@@ -4,7 +4,7 @@
   <img src="public/excel_ai_logo.png" alt="Excel AI Logo" width="128" />
 </div>
 
-**Excel AI** is a powerful, serverless Artificial Intelligence assistant that integrates directly into Microsoft Excel. It allows you to chat with your data, apply professional formatting, and perform complex data analysis using your favorite AI models without ever leaving your spreadsheet.
+**Excel AI** is a serverless AI agent that integrates directly into Microsoft Excel. It can inspect your whole workbook, create sheets, write native Excel tables and live formulas, and format data, using your favorite AI models without ever leaving your spreadsheet.
 
 <div align="center">
   <img src="public/excel_ai_screenshot.png" alt="Excel AI Screenshot" width="800" />
@@ -12,14 +12,19 @@
 
 ## Features
 
-- 🧠 **Bring Your Own AI**: Connect to a variety of AI models:
-  - **Local Models:** Run local, private models via LM Studio.
-  - **Cloud Providers:** Connect to Google Gemini, OpenCode Zen, or any Custom OpenAI-compatible endpoint.
-  - **Free Tier Support:** Easily connect to generous free tiers from providers like **Groq**, **OpenRouter**, and **Together AI**.
-- 📊 **Context-Aware Analysis**: The AI automatically reads your current active sheet, selected range, and the overall structure of your workbook to provide accurate, data-driven answers.
-- 🎨 **Automated Formatting**: Ask the AI to format your data, and it will apply professional styles, colors, borders, and number formats automatically.
-- 🔒 **Privacy-First (Serverless)**: There is no middleman backend server. Your API keys are stored securely in your browser's local storage, and the add-in communicates directly from your browser to the AI provider.
-- 🌐 **CORS Proxy Support**: Built-in support to route traffic through `corsproxy.io` for API providers that have strict browser CORS policies.
+- 🤖 **Workbook-level agent (tool calling)**: The model works through a set of Excel tools and gets the result of every call back, so it can fix its own mistakes (duplicate sheet names, invalid ranges, `#NAME?` formula errors…):
+  - `get_workbook_context` – sheets, active sheet, selection, used ranges, headers and tables
+  - `read_range` – read values/formulas (limited per call; 2000 cells by default, configurable in Settings)
+  - `activate_worksheet` / `create_worksheet`
+  - `write_table` – write data as a native Excel table with auto-fitted columns
+  - `set_range_values_or_formulas` – values or live formulas (SUM, XLOOKUP, FILTER…)
+  - `format_range` – bold, colors, alignment, number formats
+- ✅ **Approval & undo**: Changes to the workbook are shown for approval before they're applied (can be turned off in Settings), and all changes from one request can be undone together.
+- 🧠 **Bring Your Own AI**: Any OpenAI-compatible API with tool calling:
+  - **OpenRouter** (default, model `deepseek/deepseek-chat`; also e.g. `anthropic/claude-3.5-sonnet`, `meta-llama/llama-3.3-70b-instruct`)
+  - **Google Gemini**, **OpenCode Zen**, **LM Studio** (local models), or any **custom** endpoint (Groq, Together AI…)
+- 🔒 **Serverless**: There is no backend. The add-in talks directly from your browser to the AI provider. Settings and API keys are kept in the browser's local storage, which is not encrypted and is shared by every page on the same origin — host the add-in on an origin you control.
+- 🌐 **Optional CORS proxy**: Requests can be routed through `corsproxy.io` for providers that block browser requests. Your API key and data then pass through that third party, so it's off by default.
 
 ## Installation
 
@@ -40,13 +45,34 @@ You can sideload this add-in directly into Excel for Desktop or Excel on the Web
 
 You can configure your provider in the **Settings** menu of the add-in.
 
-- **Google Gemini API:** Requires a free Gemini API Key.
-- **OpenCode Zen:** Requires an OpenCode API Key.
-- **LM Studio:** Requires LM Studio running locally on port `1234`.
-- **Custom (OpenAI Compatible):** Use this for any API that conforms to the OpenAI chat completions standard.
+The selected model must support tool (function) calling.
+
+- **OpenRouter:** Requires an OpenRouter API key. Base URL is configurable (default `https://openrouter.ai/api/v1`). Use **Load models** to pick from the live model list.
+- **Google Gemini:** Requires a Gemini API key (uses Gemini's OpenAI-compatible endpoint).
+- **OpenCode Zen:** API key optional.
+- **LM Studio:** Requires LM Studio running locally on port `1234` with CORS enabled and a model that supports tool use.
+- **Custom (OpenAI Compatible):** Any API that implements OpenAI chat completions with tools.
   - *Groq Base URL:* `https://api.groq.com/openai/v1`
-  - *OpenRouter Base URL:* `https://openrouter.ai/api/v1`
   - *Together AI Base URL:* `https://api.together.xyz/v1`
+
+Requires Excel with ExcelApi 1.9 or later (Microsoft 365, Excel 2021+, Excel on the web).
+
+## Development
+
+```bash
+npm install
+npm run dev     # https://localhost:5173 — sideload manifest.xml
+npm run build
+npm run lint
+```
+
+Code layout:
+
+- `src/agent/tools.ts` – JSON schemas of the tools sent to the model
+- `src/agent/excelTools.ts` – Office.js executors and the undo journal
+- `src/agent/llmClient.ts` – OpenAI-compatible chat completions client
+- `src/agent/agentLoop.ts` – `runAgentLoop`: inference → tool dispatch → feedback loop
+- `src/components/` – chat and settings task pane UI
 
 ## Publishing to Microsoft AppSource
 
@@ -59,8 +85,8 @@ To publish this add-in to the Microsoft Store:
 
 ## Legal
 
-- [Privacy Policy](https://mohammednabarawy.github.io/excel-ai-addin/privacy.html)
-- [Terms of Use](https://mohammednabarawy.github.io/excel-ai-addin/terms.html)
+- [Privacy Policy](https://juancarlosop03.github.io/excel-ai-addin/privacy.html)
+- [Terms of Use](https://juancarlosop03.github.io/excel-ai-addin/terms.html)
 
 ---
 *Built with React, Fluent UI, and Vite.*

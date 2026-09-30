@@ -19,6 +19,9 @@ const useStyles = makeStyles({
     justifyContent: 'space-between',
     alignItems: 'center',
   },
+  headerButton: {
+    color: tokens.colorNeutralForegroundOnBrand,
+  },
   content: {
     flex: 1,
     overflowY: 'auto',
@@ -35,8 +38,8 @@ function App() {
         <span style={{ fontWeight: 600 }}>Excel AI</span>
         {view === 'chat' && (
           <Button 
-            appearance="transparent" 
-            style={{ color: 'white' }}
+            appearance="transparent"
+            className={styles.headerButton}
             onClick={() => setView('settings')}
           >
             Settings

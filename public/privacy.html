@@ -13,23 +13,29 @@
 <body>
     <div class="container">
         <h1>Privacy Policy for Excel AI</h1>
-        <p><strong>Last Updated: June 13, 2026</strong></p>
+        <p><strong>Last Updated: September 30, 2026</strong></p>
         
         <h2>1. Introduction</h2>
         <p>Excel AI ("we", "our", or "us") is committed to protecting your privacy. This Privacy Policy explains how we collect, use, and safeguard your information when you use our Microsoft Excel add-in.</p>
         
         <h2>2. Data Collection and Storage</h2>
         <p><strong>We do not collect, store, or transmit your data to any of our own servers.</strong></p>
-        <p>The Excel AI add-in is a client-side application. All settings, including your API keys and configuration preferences, are stored locally within your browser's local storage.</p>
+        <p>The Excel AI add-in is a client-side application. All settings, including your API keys and configuration preferences, are stored locally within your browser's local storage. Browser local storage is not encrypted, and it is shared by all pages served from the same web address (origin) as the add-in.</p>
         
         <h2>3. Third-Party Services</h2>
-        <p>The add-in communicates directly with third-party Artificial Intelligence providers (e.g., Google Gemini, OpenCode, Groq, OpenRouter) based on the API keys and endpoints you configure. When you use these services, your spreadsheet data (specifically the ranges you select or query) is sent directly to those providers to generate responses.</p>
+        <p>The add-in communicates directly with third-party Artificial Intelligence providers (e.g., OpenRouter, Google Gemini, OpenCode, Groq) based on the API keys and endpoints you configure. When you send a message, the following is sent directly to the provider you selected:</p>
+        <ul>
+            <li>Your chat messages and the conversation history of the current session.</li>
+            <li>The structure of your workbook: sheet names, used-range sizes, the selected range address, table names and header rows, and a few sample rows of the active sheet.</li>
+            <li>The contents of any range the assistant reads with its tools while answering your request, and the results of the changes it makes.</li>
+        </ul>
+        <p>When using a local provider such as LM Studio, this data stays on your machine.</p>
         <p>Please review the privacy policies of the respective AI providers you choose to use:</p>
         <ul>
             <li>Google (Gemini)</li>
             <li>Your configured custom providers</li>
         </ul>
-        <p>If you enable the "Use public CORS proxy" feature, your API requests will be routed through a public proxy service (e.g., corsproxy.io) to bypass browser restrictions. Please be aware that routing traffic through public proxies carries inherent privacy risks.</p>
+        <p>If you enable the "Use the public CORS proxy" option, your API requests — including your API key and the workbook data described above — are routed through a third-party proxy service (corsproxy.io) to bypass browser restrictions. That service can read this traffic. Only enable it if you accept that risk.</p>
         
         <h2>4. Changes to This Policy</h2>
         <p>We may update this Privacy Policy from time to time. Any changes will be reflected on this page with an updated revision date.</p>

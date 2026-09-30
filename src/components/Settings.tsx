@@ -1,14 +1,17 @@
 import { useState } from 'react';
-import { 
-  Button, 
-  Input, 
-  Select, 
-  Field, 
-  Checkbox,
-  makeStyles,
-  tokens
-} from '@fluentui/react-components';
-import { loadSettings, saveSettings, type AppSettings } from '../utils/storage';
+import { Button, Checkbox, Field, Input, Select, makeStyles, tokens } from '@fluentui/react-components';
+import {
+  PROVIDERS,
+  PROVIDER_IDS,
+  READ_CELLS_LIMITS,
+  clampReadCells,
+  loadSettings,
+  saveSettings,
+  type AppSettings,
+  type ProviderConfig,
+  type ProviderId,
+} from '../utils/storage';
+import { listModels } from '../agent/llmClient';
 
 const useStyles = makeStyles({
   container: {
@@ -20,7 +23,19 @@ const useStyles = makeStyles({
   header: {
     fontSize: tokens.fontSizeBase500,
     fontWeight: tokens.fontWeightSemibold,
-  }
+  },
+  row: {
+    display: 'flex',
+    gap: '8px',
+    alignItems: 'flex-end',
+  },
+  grow: {
+    flex: 1,
+  },
+  hint: {
+    fontSize: tokens.fontSizeBase200,
+    color: tokens.colorNeutralForeground3,
+  },
 });
 
 interface SettingsProps {
@@ -29,217 +44,138 @@ interface SettingsProps {
 
 export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
   const styles = useStyles();
-  const [settings, setSettings] = useState<AppSettings>(loadSettings());
-  const [availableModels, setAvailableModels] = useState<string[]>([]);
-  const [isFetchingModels, setIsFetchingModels] = useState(false);
-  const [availableOpenCodeModels, setAvailableOpenCodeModels] = useState<{id: string, name: string}[]>([]);
-  const [isFetchingOpenCodeModels, setIsFetchingOpenCodeModels] = useState(false);
-  const [openCodeError, setOpenCodeError] = useState('');
+  const [settings, setSettings] = useState<AppSettings>(loadSettings);
+  const [loadedModels, setLoadedModels] = useState<Partial<Record<ProviderId, string[]>>>({});
+  const [isLoadingModels, setIsLoadingModels] = useState(false);
+  const [modelError, setModelError] = useState('');
+  // Kept as text while editing; validated and clamped on save.
+  const [maxReadCellsText, setMaxReadCellsText] = useState(() => String(settings.maxReadCells));
 
-  const fetchOpenCodeModels = async () => {
-    if (!settings.opencodeApiKey) return;
-    setIsFetchingOpenCodeModels(true);
-    setOpenCodeError('');
-    try {
-      const targetUrl = `https://opencode.ai/zen/v1/models`;
-      const url = settings.opencodeUseProxy ? `https://corsproxy.io/?${encodeURIComponent(targetUrl)}` : targetUrl;
-      const response = await fetch(url, {
-        headers: { 'Authorization': `Bearer ${settings.opencodeApiKey}` }
-      });
-      const data = await response.json();
-      if (data.data) {
-        const models = data.data.map((m: any) => {
-          const isFree = m.id.toLowerCase().includes('free');
-          return {
-            id: m.id,
-            name: isFree ? `${m.id} (Free)` : m.id
-          };
-        });
-        setAvailableOpenCodeModels(models);
-        if (models.length > 0 && (!settings.opencodeModel || settings.opencodeModel === 'minimax-m2.5-free')) {
-          setSettings({ ...settings, opencodeModel: models[0].id });
-        }
-      } else {
-         setOpenCodeError('Invalid response format from OpenCode');
-      }
-    } catch (e: any) {
-      console.error('Failed to fetch OpenCode models', e);
-      if (e.message?.includes('Failed to fetch')) {
-        setOpenCodeError('CORS Error: OpenCode blocked the request. This usually means your API Key is invalid or missing billing details.');
-      } else {
-        setOpenCodeError(e.message || 'Unknown error fetching models');
-      }
-    } finally {
-      setIsFetchingOpenCodeModels(false);
-    }
-  };
+  const provider = settings.provider;
+  const info = PROVIDERS[provider];
+  const config = settings.providers[provider];
+  const modelOptions = [...new Set([...info.suggestedModels, ...(loadedModels[provider] ?? [])])];
 
-  const fetchGeminiModels = async () => {
-    if (!settings.geminiApiKey) return;
-    setIsFetchingModels(true);
+  const updateConfig = (patch: Partial<ProviderConfig>) =>
+    setSettings(prev => ({
+      ...prev,
+      providers: { ...prev.providers, [prev.provider]: { ...prev.providers[prev.provider], ...patch } },
+    }));
+
+  const loadModels = async () => {
+    setIsLoadingModels(true);
+    setModelError('');
     try {
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${settings.geminiApiKey}`);
-      const data = await response.json();
-      if (data.models) {
-        const models = data.models
-          .filter((m: any) => m.supportedGenerationMethods?.includes('generateContent'))
-          .map((m: any) => m.name.replace('models/', ''));
-        setAvailableModels(models);
-        if (models.length > 0 && !settings.geminiModel) {
-          setSettings({ ...settings, geminiModel: models[0] });
-        }
-      }
+      const models = await listModels(settings);
+      setLoadedModels(prev => ({ ...prev, [provider]: models }));
+      if (models.length === 0) setModelError('The provider returned no models.');
     } catch (e) {
-      console.error('Failed to fetch models', e);
+      setModelError(e instanceof Error ? e.message : String(e));
     } finally {
-      setIsFetchingModels(false);
+      setIsLoadingModels(false);
     }
   };
 
   const handleSave = () => {
-    saveSettings(settings);
+    saveSettings({ ...settings, maxReadCells: clampReadCells(maxReadCellsText) });
     onBack();
   };
 
   return (
     <div className={styles.container}>
       <div className={styles.header}>Settings</div>
-      
-      <Field label="AI Provider">
-        <Select 
-          value={settings.provider} 
-          onChange={(_, data) => setSettings({ ...settings, provider: data.value as any })}
+
+      <Field label="AI provider">
+        <Select
+          value={provider}
+          onChange={(_, data) => {
+            setSettings(prev => ({ ...prev, provider: data.value as ProviderId }));
+            setModelError('');
+          }}
         >
-          <option value="lmstudio">Local LM Studio</option>
-          <option value="gemini">Google Gemini API</option>
-          <option value="opencode">OpenCode Zen</option>
-          <option value="custom">Custom (OpenAI Compatible)</option>
+          {PROVIDER_IDS.map(id => <option key={id} value={id}>{PROVIDERS[id].label}</option>)}
         </Select>
       </Field>
 
-      {settings.provider === 'lmstudio' && (
-        <>
-          <Field label="LM Studio URL">
-            <Input 
-              value={settings.lmStudioUrl} 
-              onChange={(_, data) => setSettings({ ...settings, lmStudioUrl: data.value })}
-            />
-          </Field>
-          <Field label="LM Studio Model Name">
-            <Input 
-              value={settings.lmStudioModel || 'local-model'} 
-              onChange={(_, data) => setSettings({ ...settings, lmStudioModel: data.value })}
-            />
-          </Field>
-        </>
+      {provider === 'custom' && (
+        <div className={styles.hint}>
+          Any OpenAI-compatible API with tool calling, e.g.<br />
+          • Groq: https://api.groq.com/openai/v1<br />
+          • Together AI: https://api.together.xyz/v1
+        </div>
       )}
 
-      {settings.provider === 'gemini' && (
-        <>
-          <Field label="Google Gemini API Key">
-            <Input 
-              type="password"
-              value={settings.geminiApiKey} 
-              onChange={(_, data) => setSettings({ ...settings, geminiApiKey: data.value })}
-            />
-          </Field>
-          <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-end' }}>
-            <Field label="Gemini Model" style={{ flex: 1 }}>
-              <Select 
-                value={settings.geminiModel || 'gemini-1.5-pro-latest'} 
-                onChange={(_, data) => setSettings({ ...settings, geminiModel: data.value })}
-              >
-                {availableModels.length > 0 ? (
-                  availableModels.map(m => <option key={m} value={m}>{m}</option>)
-                ) : (
-                  <option value={settings.geminiModel || 'gemini-1.5-pro-latest'}>{settings.geminiModel || 'gemini-1.5-pro-latest'}</option>
-                )}
-              </Select>
-            </Field>
-            <Button onClick={fetchGeminiModels} disabled={!settings.geminiApiKey || isFetchingModels}>
-              {isFetchingModels ? 'Loading...' : 'Load Models'}
-            </Button>
-          </div>
-        </>
-      )}
-
-      {settings.provider === 'opencode' && (
-        <>
-          <Field label="OpenCode Zen Key (optional)">
-            <Input 
-              type="password"
-              value={settings.opencodeApiKey} 
-              onChange={(_, data) => setSettings({ ...settings, opencodeApiKey: data.value })}
-            />
-          </Field>
-          <Checkbox 
-            label="Use public CORS proxy (Bypasses CORS errors, but sends traffic through corsproxy.io)"
-            checked={!!settings.opencodeUseProxy}
-            onChange={(_, data) => setSettings({ ...settings, opencodeUseProxy: !!data.checked })}
+      {info.editableBaseUrl && (
+        <Field label="Base URL" hint="Base URL (…/v1) or the full …/chat/completions URL.">
+          <Input
+            value={config.baseUrl}
+            placeholder={info.defaultBaseUrl || 'https://api.example.com/v1'}
+            onChange={(_, data) => updateConfig({ baseUrl: data.value })}
           />
-          <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-end' }}>
-            <Field label="OpenCode Model" style={{ flex: 1 }}>
-              <Select 
-                value={settings.opencodeModel || 'minimax-m2.5-free'} 
-                onChange={(_, data) => setSettings({ ...settings, opencodeModel: data.value })}
-              >
-                {availableOpenCodeModels.length > 0 ? (
-                  availableOpenCodeModels.map(m => <option key={m.id} value={m.id}>{m.name}</option>)
-                ) : (
-                  <option value={settings.opencodeModel || 'minimax-m2.5-free'}>{settings.opencodeModel || 'minimax-m2.5-free'}</option>
-                )}
-              </Select>
-            </Field>
-            <Button onClick={fetchOpenCodeModels} disabled={!settings.opencodeApiKey || isFetchingOpenCodeModels}>
-              {isFetchingOpenCodeModels ? 'Loading...' : 'Load Models'}
-            </Button>
-          </div>
-          {openCodeError && (
-            <div style={{ color: 'red', fontSize: '12px', marginTop: '4px' }}>
-              {openCodeError}
-            </div>
-          )}
-        </>
+        </Field>
       )}
 
-      {settings.provider === 'custom' && (
-        <>
-          <div style={{ fontSize: '12px', color: '#666', marginBottom: '8px' }}>
-            <strong>Free Tier Tips:</strong><br/>
-            • <strong>Groq:</strong> https://api.groq.com/openai/v1<br/>
-            • <strong>OpenRouter:</strong> https://openrouter.ai/api/v1<br/>
-            • <strong>Together AI:</strong> https://api.together.xyz/v1
-          </div>
-          <Field label="Custom Base URL">
-            <Input 
-              value={settings.customBaseUrl} 
-              placeholder="https://api.groq.com/openai/v1"
-              onChange={(_, data) => setSettings({ ...settings, customBaseUrl: data.value })}
-            />
-          </Field>
-          <Field label="Custom API Key">
-            <Input 
-              type="password"
-              value={settings.customApiKey} 
-              onChange={(_, data) => setSettings({ ...settings, customApiKey: data.value })}
-            />
-          </Field>
-          <Field label="Custom Model ID">
-            <Input 
-              value={settings.customModel || ''} 
-              placeholder="llama3-70b-8192"
-              onChange={(_, data) => setSettings({ ...settings, customModel: data.value })}
-            />
-          </Field>
-          <Checkbox 
-            label="Use public CORS proxy (Bypasses CORS errors, routes through corsproxy.io)"
-            checked={!!settings.customUseProxy}
-            onChange={(_, data) => setSettings({ ...settings, customUseProxy: !!data.checked })}
+      <Field label={info.requiresKey ? 'API key' : 'API key (optional)'}>
+        <Input type="password" value={config.apiKey} onChange={(_, data) => updateConfig({ apiKey: data.value })} />
+      </Field>
+
+      <div className={styles.row}>
+        <Field
+          label="Model"
+          className={styles.grow}
+          hint={loadedModels[provider] ? `${loadedModels[provider].length} models loaded — type to filter.` : 'Type a model id or load the list.'}
+        >
+          <Input
+            list="model-options"
+            value={config.model}
+            placeholder={info.defaultModel || 'model-id'}
+            onChange={(_, data) => updateConfig({ model: data.value })}
           />
-        </>
+        </Field>
+        <Button onClick={loadModels} disabled={isLoadingModels || (info.requiresKey && !config.apiKey)}>
+          {isLoadingModels ? 'Loading…' : 'Load models'}
+        </Button>
+      </div>
+      <datalist id="model-options">
+        {modelOptions.map(m => <option key={m} value={m} />)}
+      </datalist>
+      {modelError && <Field validationState="error" validationMessage={modelError} />}
+      <div className={styles.hint}>The model must support tool (function) calling.</div>
+
+      {info.supportsProxy && (
+        <Checkbox
+          label="Use the public CORS proxy (corsproxy.io). Only enable it if direct requests are blocked: your API key and workbook data will pass through that third-party service."
+          checked={config.useProxy}
+          onChange={(_, data) => updateConfig({ useProxy: data.checked === true })}
+        />
       )}
 
-      <Button appearance="primary" onClick={handleSave}>Save & Close</Button>
+      <Field
+        label="Max cells per read"
+        hint={`Cells the agent can read in one read_range call (${READ_CELLS_LIMITS.min}–${READ_CELLS_LIMITS.max}, default ${READ_CELLS_LIMITS.default}). Higher values let it see more data at once but send more tokens to the provider (slower, more expensive, may exceed the model's context).`}
+      >
+        <Input
+          type="number"
+          min={READ_CELLS_LIMITS.min}
+          max={READ_CELLS_LIMITS.max}
+          step={500}
+          value={maxReadCellsText}
+          onChange={(_, data) => setMaxReadCellsText(data.value)}
+          onBlur={() => setMaxReadCellsText(String(clampReadCells(maxReadCellsText)))}
+        />
+      </Field>
+
+      <Checkbox
+        label="Apply workbook changes without asking for approval"
+        checked={settings.autoApprove}
+        onChange={(_, data) => setSettings(prev => ({ ...prev, autoApprove: data.checked === true }))}
+      />
+
+      <div className={styles.hint}>
+        Settings and API keys are stored in this browser's local storage for the add-in's web address. They are only sent to the provider you choose (and to the CORS proxy, if enabled).
+      </div>
+
+      <Button appearance="primary" onClick={handleSave}>Save & close</Button>
       <Button appearance="subtle" onClick={onBack}>Cancel</Button>
     </div>
   );
