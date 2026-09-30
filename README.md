@@ -13,12 +13,11 @@
 ## Features
 
 - 🤖 **Workbook-level agent (tool calling)**: The model works through a set of Excel tools and gets the result of every call back, so it can fix its own mistakes (duplicate sheet names, invalid ranges, `#NAME?` formula errors…):
-  - `get_workbook_context` – sheets, active sheet, selection, used ranges, headers and tables
-  - `read_range` – read values/formulas (limited per call; 2000 cells by default, configurable in Settings)
-  - `activate_worksheet` / `create_worksheet`
-  - `write_table` – write data as a native Excel table with auto-fitted columns
-  - `set_range_values_or_formulas` – values or live formulas (SUM, XLOOKUP, FILTER…)
-  - `format_range` – bold, colors, alignment, number formats
+  - **Inspect:** `get_workbook_context` (sheets, selection, tables, charts, PivotTables, named ranges), `read_range` (limited per call; 2000 cells by default, configurable in Settings), `search_workbook`
+  - **Sheets & names:** `activate_worksheet`, `create_worksheet`, `rename_worksheet`, `create_named_range`
+  - **Data:** `write_table`, `convert_range_to_table`, `set_range_values_or_formulas` (live formulas: SUM, XLOOKUP, FILTER…), `clear_range`, `sort_range`, `filter_table`, `add_data_validation` (dropdowns and input rules)
+  - **Formatting:** `format_range` (fonts, fills, borders, number formats), `add_conditional_format` (color scales, data bars, icon sets, highlight rules)
+  - **Analysis:** `create_chart` (column, bar, line, pie, scatter, waterfall…), `create_pivot_table`
 - ✅ **Approval & undo**: Changes to the workbook are shown for approval before they're applied (can be turned off in Settings), and all changes from one request can be undone together.
 - 🧠 **Bring Your Own AI**: Any OpenAI-compatible API with tool calling:
   - **OpenRouter** (default, model `deepseek/deepseek-chat`; also e.g. `anthropic/claude-3.5-sonnet`, `meta-llama/llama-3.3-70b-instruct`)
@@ -69,7 +68,7 @@ npm run lint
 Code layout:
 
 - `src/agent/tools.ts` – JSON schemas of the tools sent to the model
-- `src/agent/excelTools.ts` – Office.js executors and the undo journal
+- `src/agent/excel/` – Office.js executors (`workbookTools`, `dataTools`, `formatTools`, `analysisTools`) and the undo journal (`undo.ts`)
 - `src/agent/llmClient.ts` – OpenAI-compatible chat completions client
 - `src/agent/agentLoop.ts` – `runAgentLoop`: inference → tool dispatch → feedback loop
 - `src/components/` – chat and settings task pane UI

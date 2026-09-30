@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Button, Spinner, Textarea, makeStyles, mergeClasses, tokens } from '@fluentui/react-components';
 import { loadSettings } from '../utils/storage';
 import { runAgentLoop, type AgentEvent, type ApprovalDecision, type ApprovalRequest } from '../agent/agentLoop';
-import { canUndo, getSelectedRangeAddress, undoLastGroup } from '../agent/excelTools';
+import { canUndo, getSelectedRangeAddress, undoLastGroup } from '../agent/excel';
 import type { ChatMessage } from '../agent/llmClient';
 
 const useStyles = makeStyles({
