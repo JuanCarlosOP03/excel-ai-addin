@@ -18,7 +18,8 @@ import type { ChatMessage } from '../agent/llmClient';
 import { findSkill, getSkills, type Skill } from '../agent/skills';
 import { Markdown } from './Markdown';
 import { ChangesCard, ToolCard } from './ToolCard';
-import { EffortMenu, ModelMenu, SkillsMenu } from './ComposerControls';
+import { AttachButton, EffortMenu, ModelMenu, SkillsMenu } from './ComposerControls';
+import { ArrowUp24Filled, Stop24Filled } from '@fluentui/react-icons';
 import type { ChangesItem, ChatItem, ToolItem } from './chatTypes';
 
 const useStyles = makeStyles({
@@ -129,24 +130,24 @@ const useStyles = makeStyles({
     fontSize: tokens.fontSizeBase200,
     color: tokens.colorNeutralForeground2,
   },
-  inputRow: {
-    display: 'flex',
-    gap: '6px',
-    alignItems: 'flex-end',
-    padding: '8px 8px 4px',
-  },
   input: {
-    flex: 1,
+    display: 'flex',
+    width: '100%',
+    maxWidth: '100%',
+    padding: '8px 8px 2px',
   },
   toolbar: {
     display: 'flex',
     alignItems: 'center',
     flexWrap: 'wrap',
-    gap: '2px',
-    padding: '0 4px 4px',
+    gap: '4px',
+    padding: '2px 8px 8px',
   },
   spacer: {
     flex: 1,
+  },
+  sendButton: {
+    minWidth: '32px',
   },
   hiddenInput: {
     display: 'none',
@@ -668,50 +669,38 @@ export const Chat: React.FC<ChatProps> = ({ onOpenSettings }) => {
           </div>
         )}
         {attachmentWarning && <div className={styles.warning}>{attachmentWarning}</div>}
-        <div className={styles.inputRow}>
-          <input
-            ref={fileInputRef}
-            className={styles.hiddenInput}
-            type="file"
-            multiple
-            accept={ATTACH_ACCEPT}
-            onChange={e => {
-              void addFiles([...(e.target.files ?? [])]);
-              e.target.value = '';
-            }}
-          />
-          <Textarea
-            className={styles.input}
-            appearance="filled-lighter"
-            value={input}
-            onChange={(_, data) => setInput(data.value)}
-            onPaste={handlePaste}
-            onKeyDown={e => {
-              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-                e.preventDefault();
-                void handleSend();
-              }
-            }}
-            placeholder="Ask the agent… (/skill to use a skill, Shift+Enter for a new line)"
-            resize="vertical"
-            disabled={isRunning}
-          />
-          {isRunning
-            ? <Button onClick={handleStop}>Stop</Button>
-            : <Button appearance="primary" onClick={() => void handleSend()} disabled={!input.trim()}>Send</Button>}
-        </div>
+        <input
+          ref={fileInputRef}
+          className={styles.hiddenInput}
+          type="file"
+          multiple
+          accept={ATTACH_ACCEPT}
+          onChange={e => {
+            void addFiles([...(e.target.files ?? [])]);
+            e.target.value = '';
+          }}
+        />
+        <Textarea
+          className={styles.input}
+          appearance="filled-lighter"
+          value={input}
+          onChange={(_, data) => setInput(data.value)}
+          onPaste={handlePaste}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              void handleSend();
+            }
+          }}
+          placeholder="Ask the agent… (/skill to use a skill, Shift+Enter for a new line)"
+          resize="vertical"
+          disabled={isRunning}
+        />
         <div className={styles.toolbar}>
-          <Button
-            size="small"
-            appearance="subtle"
-            icon={<span aria-hidden>📎</span>}
-            aria-label="Attach files"
-            title="Attach CSV, JSON, text, PDF or images"
-            disabled={isRunning}
-            onClick={() => fileInputRef.current?.click()}
-          />
+          <AttachButton disabled={isRunning} onClick={() => fileInputRef.current?.click()} />
           <SkillsMenu skills={allSkills} selected={selectedSkills} disabled={isRunning} onChange={setSelectedSkills} onManage={onOpenSettings} />
           <div className={styles.spacer} />
+          <EffortMenu settings={settings} disabled={isRunning} onChange={effort => updateSettings({ ...settings, reasoningEffort: effort })} />
           <ModelMenu
             settings={settings}
             disabled={isRunning}
@@ -719,7 +708,20 @@ export const Chat: React.FC<ChatProps> = ({ onOpenSettings }) => {
             onAddCurrent={addCurrentToFavorites}
             onManage={onOpenSettings}
           />
-          <EffortMenu settings={settings} disabled={isRunning} onChange={effort => updateSettings({ ...settings, reasoningEffort: effort })} />
+          {isRunning
+            ? <Button className={styles.sendButton} shape="circular" icon={<Stop24Filled />} aria-label="Stop" title="Stop" onClick={handleStop} />
+            : (
+              <Button
+                className={styles.sendButton}
+                appearance="primary"
+                shape="circular"
+                icon={<ArrowUp24Filled />}
+                aria-label="Send"
+                title="Send"
+                disabled={!input.trim()}
+                onClick={() => void handleSend()}
+              />
+            )}
         </div>
       </div>
     </div>

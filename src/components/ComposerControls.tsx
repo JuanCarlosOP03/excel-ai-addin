@@ -1,4 +1,5 @@
 import {
+  Button,
   Menu,
   MenuButton,
   MenuDivider,
@@ -11,8 +12,10 @@ import {
   MenuPopover,
   MenuTrigger,
   makeStyles,
+  mergeClasses,
   tokens,
 } from '@fluentui/react-components';
+import { Attach24Regular, Clock24Regular, FastForward20Regular } from '@fluentui/react-icons';
 import {
   MAX_FAVORITES,
   PROVIDERS,
@@ -25,11 +28,11 @@ import {
 import type { Skill } from '../agent/skills';
 
 const useStyles = makeStyles({
-  button: {
+  modelButton: {
     minWidth: 0,
     maxWidth: '150px',
-    paddingLeft: '6px',
-    paddingRight: '4px',
+    paddingLeft: '8px',
+    paddingRight: '6px',
     fontWeight: tokens.fontWeightRegular,
     color: tokens.colorNeutralForeground2,
     '& > span:first-child': {
@@ -37,6 +40,12 @@ const useStyles = makeStyles({
       textOverflow: 'ellipsis',
       whiteSpace: 'nowrap',
     },
+  },
+  iconButton: {
+    color: tokens.colorNeutralForeground3,
+  },
+  iconButtonActive: {
+    color: tokens.colorBrandForeground1,
   },
   note: {
     padding: '4px 8px',
@@ -72,7 +81,7 @@ export const ModelMenu: React.FC<ModelMenuProps> = ({ settings, disabled, onSele
       }}
     >
       <MenuTrigger disableButtonEnhancement>
-        <MenuButton size="small" appearance="subtle" className={styles.button} disabled={disabled} title={`${PROVIDERS[settings.provider].label}: ${config.model}`}>
+        <MenuButton size="small" appearance="subtle" className={styles.modelButton} disabled={disabled} title={`${PROVIDERS[settings.provider].label}: ${config.model}`}>
           {label}
         </MenuButton>
       </MenuTrigger>
@@ -116,22 +125,21 @@ export const EffortMenu: React.FC<EffortMenuProps> = ({ settings, disabled, onCh
   const config = settings.providers[settings.provider];
   const unsupported = config.modelInfo?.id === config.model && config.modelInfo.supportsReasoning === false;
   const current = REASONING_EFFORTS.find(e => e.value === settings.reasoningEffort) ?? REASONING_EFFORTS[0];
+  const active = !unsupported && settings.reasoningEffort !== 'default';
 
   return (
-    <Menu
-      checkedValues={{ effort: [settings.reasoningEffort] }}
-      onCheckedValueChange={(_, data) => onChange(data.checkedItems[0] as ReasoningEffort)}
-    >
+    <Menu checkedValues={{ effort: [settings.reasoningEffort] }} onCheckedValueChange={(_, data) => onChange(data.checkedItems[0] as ReasoningEffort)}>
       <MenuTrigger disableButtonEnhancement>
-        <MenuButton
+        <Button
           size="small"
           appearance="subtle"
-          className={styles.button}
+          shape="circular"
+          className={mergeClasses(styles.iconButton, active && styles.iconButtonActive)}
+          icon={<Clock24Regular />}
           disabled={disabled}
-          title="Reasoning effort: how much the model thinks before answering"
-        >
-          {unsupported ? 'Effort: n/a' : `Effort: ${current.label}`}
-        </MenuButton>
+          aria-label={`Reasoning effort: ${current.label}`}
+          title={unsupported ? "Reasoning effort (the selected model doesn't support it)" : `Reasoning effort: ${current.label}`}
+        />
       </MenuTrigger>
       <MenuPopover>
         <MenuList>
@@ -167,9 +175,16 @@ export const SkillsMenu: React.FC<SkillsMenuProps> = ({ skills, selected, disabl
   return (
     <Menu checkedValues={{ skills: selected }} onCheckedValueChange={(_, data) => onChange(data.checkedItems)}>
       <MenuTrigger disableButtonEnhancement>
-        <MenuButton size="small" appearance="subtle" className={styles.button} disabled={disabled} title="Attach a skill (expert playbook) to your next message">
-          {selected.length ? `Skills (${selected.length})` : 'Skills'}
-        </MenuButton>
+        <Button
+          size="small"
+          appearance="subtle"
+          shape="circular"
+          className={mergeClasses(styles.iconButton, selected.length > 0 && styles.iconButtonActive)}
+          icon={<FastForward20Regular />}
+          disabled={disabled}
+          aria-label={selected.length ? `Skills (${selected.length} selected)` : 'Skills'}
+          title={selected.length ? `Skills (${selected.length} selected)` : 'Attach a skill (expert playbook) to your next message'}
+        />
       </MenuTrigger>
       <MenuPopover>
         <MenuList>
@@ -187,5 +202,27 @@ export const SkillsMenu: React.FC<SkillsMenuProps> = ({ skills, selected, disabl
         </MenuList>
       </MenuPopover>
     </Menu>
+  );
+};
+
+interface AttachButtonProps {
+  disabled?: boolean;
+  onClick: () => void;
+}
+
+export const AttachButton: React.FC<AttachButtonProps> = ({ disabled, onClick }) => {
+  const styles = useStyles();
+  return (
+    <Button
+      size="small"
+      appearance="subtle"
+      shape="circular"
+      className={styles.iconButton}
+      icon={<Attach24Regular />}
+      disabled={disabled}
+      aria-label="Attach files"
+      title="Attach CSV, JSON, text, PDF or images"
+      onClick={onClick}
+    />
   );
 };
