@@ -1,9 +1,23 @@
 import { useEffect, useRef, useState } from 'react';
 import { Button, Spinner, Textarea, makeStyles, mergeClasses, tokens } from '@fluentui/react-components';
 import { loadSettings } from '../utils/storage';
+import { debounce, getWorkbookId, kvDelete, kvGet, kvSet } from '../utils/persistence';
 import { runAgentLoop, type AgentEvent, type ApprovalDecision, type ApprovalRequest } from '../agent/agentLoop';
-import { canUndo, getSelectedRangeAddress, undoLastGroup } from '../agent/excel';
+import {
+  canUndo,
+  cleanupOrphanBackups,
+  getSelectedRangeAddress,
+  initUndo,
+  selectReference,
+  undoLastGroup,
+  type UndoStep,
+} from '../agent/excel';
+import { readAttachment, type Attachment } from '../agent/attachments';
+import { stripBinaryContent } from '../agent/context';
 import type { ChatMessage } from '../agent/llmClient';
+import { Markdown } from './Markdown';
+import { ChangesCard, ToolCard } from './ToolCard';
+import type { ChangesItem, ChatItem, ToolItem } from './chatTypes';
 
 const useStyles = makeStyles({
   container: {
@@ -29,15 +43,20 @@ const useStyles = makeStyles({
   bubble: {
     padding: '8px 12px',
     borderRadius: tokens.borderRadiusLarge,
-    maxWidth: '90%',
-    whiteSpace: 'pre-wrap',
+    maxWidth: '92%',
     wordBreak: 'break-word',
     fontSize: tokens.fontSizeBase300,
   },
   user: {
     alignSelf: 'flex-end',
+    whiteSpace: 'pre-wrap',
     backgroundColor: tokens.colorBrandBackground,
     color: tokens.colorNeutralForegroundOnBrand,
+  },
+  userAttachments: {
+    fontSize: tokens.fontSizeBase200,
+    opacity: 0.85,
+    marginTop: '4px',
   },
   assistant: {
     alignSelf: 'flex-start',
@@ -46,49 +65,16 @@ const useStyles = makeStyles({
   },
   error: {
     alignSelf: 'stretch',
+    whiteSpace: 'pre-wrap',
     backgroundColor: tokens.colorPaletteRedBackground1,
     color: tokens.colorPaletteRedForeground1,
     maxWidth: '100%',
   },
   info: {
     alignSelf: 'center',
+    textAlign: 'center',
     color: tokens.colorNeutralForeground3,
     fontSize: tokens.fontSizeBase200,
-  },
-  tool: {
-    alignSelf: 'stretch',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '4px',
-    padding: '6px 10px',
-    borderRadius: tokens.borderRadiusMedium,
-    border: `1px solid ${tokens.colorNeutralStroke2}`,
-    fontSize: tokens.fontSizeBase200,
-    color: tokens.colorNeutralForeground2,
-  },
-  toolAwaiting: {
-    border: `1px solid ${tokens.colorPaletteMarigoldBorder2}`,
-    backgroundColor: tokens.colorPaletteMarigoldBackground1,
-  },
-  toolLine: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '6px',
-  },
-  toolDetail: {
-    color: tokens.colorNeutralForeground3,
-    wordBreak: 'break-word',
-  },
-  toolError: {
-    color: tokens.colorPaletteRedForeground1,
-  },
-  args: {
-    maxHeight: '160px',
-    overflow: 'auto',
-    margin: 0,
-    fontFamily: tokens.fontFamilyMonospace,
-    fontSize: tokens.fontSizeBase100,
-    whiteSpace: 'pre',
   },
   actions: {
     display: 'flex',
@@ -103,6 +89,33 @@ const useStyles = makeStyles({
     backgroundColor: tokens.colorNeutralBackground1,
     overflow: 'hidden',
   },
+  chipRow: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: '4px',
+    padding: '6px 8px 0',
+  },
+  chip: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '2px',
+    maxWidth: '100%',
+    padding: '0 2px 0 8px',
+    borderRadius: tokens.borderRadiusMedium,
+    backgroundColor: tokens.colorNeutralBackground3,
+    fontSize: tokens.fontSizeBase200,
+    color: tokens.colorNeutralForeground2,
+  },
+  chipLabel: {
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
+  warning: {
+    padding: '4px 10px 0',
+    fontSize: tokens.fontSizeBase200,
+    color: tokens.colorPaletteDarkOrangeForeground1,
+  },
   selectionChip: {
     display: 'flex',
     alignItems: 'center',
@@ -114,53 +127,52 @@ const useStyles = makeStyles({
     fontSize: tokens.fontSizeBase200,
     color: tokens.colorNeutralForeground2,
   },
-  selectionLabel: {
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap',
-  },
   inputRow: {
     display: 'flex',
-    gap: '8px',
+    gap: '6px',
     alignItems: 'flex-end',
     padding: '8px',
   },
   input: {
     flex: 1,
   },
+  hiddenInput: {
+    display: 'none',
+  },
 });
 
-type ToolStatus = 'running' | 'awaiting_approval' | 'ok' | 'error' | 'rejected';
-
-interface ToolItem {
-  kind: 'tool';
-  id: string;
-  name: string;
-  summary: string;
-  status: ToolStatus;
-  detail?: string;
-  args?: string;
+interface StoredChat {
+  items: ChatItem[];
+  history: ChatMessage[];
 }
 
-type ChatItem = { kind: 'user' | 'assistant' | 'error' | 'info'; id: string; text: string } | ToolItem;
+const ATTACH_ACCEPT = '.csv,.tsv,.txt,.json,.md,.pdf,image/*';
 
-const STATUS_ICON: Record<ToolStatus, string> = {
-  running: '',
-  awaiting_approval: '⚠',
-  ok: '✓',
-  error: '✗',
-  rejected: '⊘',
-};
+const saveChat = debounce(({ key, chat }: { key: string; chat: StoredChat }) => void kvSet(`chat:${key}`, chat));
 
 let lastItemId = 0;
-const newId = () => `item-${++lastItemId}`;
+const newId = () => `${Date.now().toString(36)}-${++lastItemId}`;
+
+const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+/** Items restored from storage can't still be running. */
+const settleItems = (items: ChatItem[]): ChatItem[] =>
+  items.map(item => {
+    if (item.kind === 'assistant' && item.streaming) return { ...item, streaming: false };
+    if (item.kind === 'tool' && (item.status === 'running' || item.status === 'awaiting_approval')) {
+      return { ...item, status: 'error', detail: 'Not executed.', args: undefined, preview: undefined };
+    }
+    return item;
+  });
 
 export const Chat: React.FC = () => {
   const styles = useStyles();
   const [input, setInput] = useState('');
   const [items, setItems] = useState<ChatItem[]>([]);
   const [isRunning, setIsRunning] = useState(false);
-  const [undoAvailable, setUndoAvailable] = useState(canUndo);
+  const [status, setStatus] = useState('');
+  const [undoAvailable, setUndoAvailable] = useState(false);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
   // Sheet-qualified address of the current selection, shown above the input and given to the agent.
   const [selection, setSelection] = useState<string | null>(null);
   const [selectionDismissed, setSelectionDismissed] = useState(false);
@@ -170,10 +182,38 @@ export const Chat: React.FC = () => {
   const abortRef = useRef<AbortController | null>(null);
   const approvalsRef = useRef(new Map<string, (decision: ApprovalDecision) => void>());
   const bottomRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const storageKeyRef = useRef<string | null>(null);
+
+  // Restore this workbook's conversation and undo history.
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      const id = await getWorkbookId();
+      const [chat, undo] = await Promise.all([kvGet<StoredChat>(`chat:${id}`), kvGet<UndoStep[][]>(`undo:${id}`)]);
+      if (!active) return;
+      storageKeyRef.current = id;
+      if (chat) {
+        historyRef.current = chat.history ?? [];
+        setItems(settleItems(chat.items ?? []));
+      }
+      initUndo(undo ?? [], stack => void kvSet(`undo:${id}`, stack));
+      setUndoAvailable(canUndo());
+      if (typeof Excel !== 'undefined') void cleanupOrphanBackups();
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    // Nothing is saved until the stored conversation has been restored.
+    if (storageKeyRef.current) saveChat({ key: storageKeyRef.current, chat: { items, history: stripBinaryContent(historyRef.current) } });
+  }, [items]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: 'end' });
-  }, [items]);
+  }, [items, status]);
 
   useEffect(() => {
     // Not running inside Excel (e.g. the page opened in a regular browser).
@@ -198,34 +238,76 @@ export const Chat: React.FC = () => {
   }, []);
 
   const addItem = (item: ChatItem) => setItems(prev => [...prev, item]);
-  const updateTool = (id: string | undefined, patch: Partial<ToolItem>) =>
-    setItems(prev => prev.map(item => (item.kind === 'tool' && item.id === id ? { ...item, ...patch } : item)));
+  const updateItem = (id: string | undefined | null, patch: Partial<ChatItem>) =>
+    setItems(prev => prev.map(item => (item.id === id ? ({ ...item, ...patch } as ChatItem) : item)));
+
+  const goToCell = (reference: string) => {
+    selectReference(reference).catch(e => addItem({ kind: 'error', id: newId(), text: `Couldn't go to ${reference}: ${errorText(e)}` }));
+  };
+
+  const addFiles = async (files: File[]) => {
+    for (const file of files) {
+      try {
+        const attachment = await readAttachment(file);
+        setAttachments(prev => [...prev, attachment]);
+      } catch (e) {
+        addItem({ kind: 'error', id: newId(), text: `Couldn't attach ${file.name || 'the file'}: ${errorText(e)}` });
+      }
+    }
+  };
 
   const handleSend = async () => {
     const text = input.trim();
     if (!text || isRunning) return;
+    const sentAttachments = attachments;
     setInput('');
-    addItem({ kind: 'user', id: newId(), text });
+    setAttachments([]);
+    addItem({ kind: 'user', id: newId(), text, ...(sentAttachments.length ? { attachments: sentAttachments.map(a => a.name) } : {}) });
     setIsRunning(true);
 
     const controller = new AbortController();
     abortRef.current = controller;
     // Providers may reuse tool call ids across runs, so they are mapped to item ids per run.
     const toolItems = new Map<string, string>();
+    const toolInfo = new Map<string, { summary: string; mutating: boolean }>();
+    const changes: ChangesItem['entries'] = [];
+    let streamingId: string | null = null;
 
     const onEvent = (event: AgentEvent) => {
+      if (event.type !== 'status') setStatus('');
       switch (event.type) {
+        case 'assistant_delta':
+          if (streamingId) {
+            const id = streamingId;
+            setItems(prev => prev.map(item => (item.id === id && item.kind === 'assistant' ? { ...item, text: item.text + event.delta } : item)));
+          } else {
+            streamingId = newId();
+            addItem({ kind: 'assistant', id: streamingId, text: event.delta, streaming: true });
+          }
+          break;
         case 'assistant_text':
-          addItem({ kind: 'assistant', id: newId(), text: event.text });
+          if (streamingId) updateItem(streamingId, { text: event.text, streaming: false });
+          else addItem({ kind: 'assistant', id: newId(), text: event.text });
+          streamingId = null;
           break;
         case 'tool_call': {
           const id = newId();
           toolItems.set(event.callId, id);
-          addItem({ kind: 'tool', id, name: event.name, summary: event.summary, status: 'running' });
+          toolInfo.set(event.callId, { summary: event.summary, mutating: event.mutating });
+          addItem({ kind: 'tool', id, name: event.name, summary: event.summary, status: 'running', mutating: event.mutating });
           break;
         }
-        case 'tool_result':
-          updateTool(toolItems.get(event.callId), { status: event.status, detail: event.detail || undefined });
+        case 'tool_result': {
+          updateItem(toolItems.get(event.callId), { status: event.status, detail: event.detail || undefined, location: event.location, args: undefined, preview: undefined });
+          const info = toolInfo.get(event.callId);
+          if (event.status === 'ok' && info?.mutating) changes.push({ summary: info.summary, location: event.location });
+          break;
+        }
+        case 'status':
+          setStatus(event.text);
+          break;
+        case 'info':
+          addItem({ kind: 'info', id: newId(), text: event.text });
           break;
       }
     };
@@ -233,7 +315,7 @@ export const Chat: React.FC = () => {
     const requestApproval = (request: ApprovalRequest) =>
       new Promise<ApprovalDecision>(resolve => {
         const id = toolItems.get(request.callId) ?? newId();
-        updateTool(id, { status: 'awaiting_approval', args: JSON.stringify(request.args, null, 2) });
+        updateItem(id, { status: 'awaiting_approval', args: request.args, preview: request.preview, irreversible: request.irreversible } as Partial<ToolItem>);
         approvalsRef.current.set(id, resolve);
       });
 
@@ -242,22 +324,21 @@ export const Chat: React.FC = () => {
         settings: loadSettings(),
         history: historyRef.current,
         userInput: text,
+        attachments: sentAttachments,
         includeSelection: !selectionDismissed,
         onEvent,
         requestApproval,
         signal: controller.signal,
       });
       historyRef.current = result.history;
+      if (changes.length > 1) addItem({ kind: 'changes', id: newId(), entries: changes });
       if (result.status === 'error') addItem({ kind: 'error', id: newId(), text: result.error ?? 'Unknown error' });
       if (result.status === 'aborted') addItem({ kind: 'info', id: newId(), text: 'Stopped.' });
     } finally {
-      setItems(prev => prev.map(item =>
-        item.kind === 'tool' && (item.status === 'running' || item.status === 'awaiting_approval')
-          ? { ...item, status: 'error', detail: 'Not executed.' }
-          : item
-      ));
+      setItems(prev => settleItems(prev));
       approvalsRef.current.clear();
       abortRef.current = null;
+      setStatus('');
       setIsRunning(false);
       setUndoAvailable(canUndo());
     }
@@ -267,7 +348,7 @@ export const Chat: React.FC = () => {
     const resolve = approvalsRef.current.get(id);
     if (!resolve) return;
     approvalsRef.current.delete(id);
-    updateTool(id, { status: decision === 'reject' ? 'rejected' : 'running' });
+    updateItem(id, { status: decision === 'reject' ? 'rejected' : 'running' });
     resolve(decision);
   };
 
@@ -283,10 +364,11 @@ export const Chat: React.FC = () => {
       historyRef.current = [
         ...historyRef.current,
         { role: 'user', content: '[Note: the user undid the most recent set of workbook changes you made.]' },
+        { role: 'assistant', content: 'Noted: those changes were undone.' },
       ];
       addItem({ kind: 'info', id: newId(), text: 'Last AI changes undone.' });
     } catch (e) {
-      addItem({ kind: 'error', id: newId(), text: `Undo failed: ${e instanceof Error ? e.message : String(e)}` });
+      addItem({ kind: 'error', id: newId(), text: `Undo failed: ${errorText(e)}` });
     } finally {
       setUndoAvailable(canUndo());
     }
@@ -295,37 +377,55 @@ export const Chat: React.FC = () => {
   const handleClear = () => {
     historyRef.current = [];
     setItems([]);
+    if (storageKeyRef.current) void kvDelete(`chat:${storageKeyRef.current}`);
   };
 
-  const renderTool = (item: ToolItem) => (
-    <div key={item.id} className={mergeClasses(styles.tool, item.status === 'awaiting_approval' && styles.toolAwaiting)}>
-      <div className={styles.toolLine}>
-        {item.status === 'running' ? <Spinner size="extra-tiny" /> : <span>{STATUS_ICON[item.status]}</span>}
-        <span>{item.summary}</span>
-      </div>
-      {item.detail && (
-        <div className={mergeClasses(styles.toolDetail, item.status === 'error' && styles.toolError)}>{item.detail}</div>
-      )}
-      {item.status === 'awaiting_approval' && (
-        <>
-          {item.args && (
-            <details>
-              <summary>Details</summary>
-              <pre className={styles.args}>{item.args}</pre>
-            </details>
-          )}
-          <div className={styles.actions}>
-            <Button size="small" appearance="primary" onClick={() => decide(item.id, 'approve')}>Approve</Button>
-            <Button size="small" onClick={() => decide(item.id, 'approve_all')}>Approve all</Button>
-            <Button size="small" onClick={() => decide(item.id, 'reject')}>Reject</Button>
-          </div>
-        </>
-      )}
-    </div>
-  );
+  const handlePaste = (e: React.ClipboardEvent) => {
+    const images = [...e.clipboardData.files].filter(f => f.type.startsWith('image/'));
+    if (images.length) {
+      e.preventDefault();
+      void addFiles(images);
+    }
+  };
 
-  const bubbleClass = { user: styles.user, assistant: styles.assistant, error: styles.error, info: styles.info };
   const awaitingApproval = items.some(item => item.kind === 'tool' && item.status === 'awaiting_approval');
+  const modelInfo = (() => {
+    const settings = loadSettings();
+    const config = settings.providers[settings.provider];
+    return config.modelInfo?.id === config.model ? config.modelInfo : undefined;
+  })();
+  const attachmentWarning =
+    attachments.some(a => a.kind === 'image') && modelInfo?.supportsImages === false ? 'The selected model does not accept images.'
+    : attachments.some(a => a.kind === 'pdf') && modelInfo?.supportsFiles === false && modelInfo?.supportsImages === false ? 'The selected model may not accept PDF files.'
+    : '';
+
+  const renderItem = (item: ChatItem) => {
+    switch (item.kind) {
+      case 'tool':
+        return <ToolCard key={item.id} item={item} onDecide={decide} onCellClick={goToCell} />;
+      case 'changes':
+        return <ChangesCard key={item.id} item={item} onCellClick={goToCell} />;
+      case 'assistant':
+        return (
+          <div key={item.id} className={mergeClasses(styles.bubble, styles.assistant)}>
+            <Markdown text={item.text} onCellClick={goToCell} />
+          </div>
+        );
+      case 'user':
+        return (
+          <div key={item.id} className={mergeClasses(styles.bubble, styles.user)}>
+            {item.text}
+            {item.attachments && <div className={styles.userAttachments}>📎 {item.attachments.join(', ')}</div>}
+          </div>
+        );
+      case 'error':
+        return <div key={item.id} className={mergeClasses(styles.bubble, styles.error)}>{item.text}</div>;
+      case 'info':
+        return <div key={item.id} className={styles.info}>{item.text}</div>;
+    }
+  };
+
+  const streaming = items.some(item => item.kind === 'assistant' && item.streaming);
 
   return (
     <div className={styles.container}>
@@ -334,16 +434,14 @@ export const Chat: React.FC = () => {
           <div className={styles.empty}>
             Ask the agent to analyze or change your workbook, for example:
             <br />• "Create a Summary sheet with total sales per region using SUMIFS"
-            <br />• "Turn the data in Sheet1 into a table and format the prices as currency"
-            <br />• "Add a column that looks up each product's category with XLOOKUP"
+            <br />• "Make a PivotTable and a chart of revenue by product"
+            <br />• "Why does F20 show #N/A?"
+            <br />• "Import the attached CSV as a table and highlight values over 1000"
           </div>
         )}
-        {items.map(item =>
-          item.kind === 'tool'
-            ? renderTool(item)
-            : <div key={item.id} className={mergeClasses(item.kind !== 'info' && styles.bubble, bubbleClass[item.kind])}>{item.text}</div>
-        )}
-        {isRunning && !awaitingApproval && <Spinner size="tiny" label="Working…" labelPosition="after" />}
+        {items.map(renderItem)}
+        {isRunning && !awaitingApproval && !streaming && <Spinner size="tiny" label={status || 'Working…'} labelPosition="after" />}
+        {isRunning && streaming && status && <div className={styles.info}>{status}</div>}
         <div ref={bottomRef} />
       </div>
 
@@ -355,7 +453,7 @@ export const Chat: React.FC = () => {
       <div className={styles.composer}>
         {selection && !selectionDismissed && (
           <div className={styles.selectionChip}>
-            <span className={styles.selectionLabel} title={selection}>
+            <span className={styles.chipLabel} title={selection}>
               {selection.slice(selection.lastIndexOf('!') + 1)} selected
             </span>
             <Button
@@ -368,12 +466,49 @@ export const Chat: React.FC = () => {
             />
           </div>
         )}
+        {attachments.length > 0 && (
+          <div className={styles.chipRow}>
+            {attachments.map(a => (
+              <span key={a.id} className={styles.chip}>
+                <span className={styles.chipLabel} title={a.name}>📎 {a.name}</span>
+                <Button
+                  size="small"
+                  appearance="transparent"
+                  icon={<span aria-hidden>✕</span>}
+                  aria-label={`Remove ${a.name}`}
+                  onClick={() => setAttachments(prev => prev.filter(x => x.id !== a.id))}
+                />
+              </span>
+            ))}
+          </div>
+        )}
+        {attachmentWarning && <div className={styles.warning}>{attachmentWarning}</div>}
         <div className={styles.inputRow}>
+          <Button
+            appearance="subtle"
+            icon={<span aria-hidden>📎</span>}
+            aria-label="Attach files"
+            title="Attach CSV, JSON, text, PDF or images"
+            disabled={isRunning}
+            onClick={() => fileInputRef.current?.click()}
+          />
+          <input
+            ref={fileInputRef}
+            className={styles.hiddenInput}
+            type="file"
+            multiple
+            accept={ATTACH_ACCEPT}
+            onChange={e => {
+              void addFiles([...(e.target.files ?? [])]);
+              e.target.value = '';
+            }}
+          />
           <Textarea
             className={styles.input}
             appearance="filled-lighter"
             value={input}
             onChange={(_, data) => setInput(data.value)}
+            onPaste={handlePaste}
             onKeyDown={e => {
               if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                 e.preventDefault();

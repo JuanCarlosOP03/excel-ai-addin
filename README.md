@@ -13,12 +13,18 @@
 ## Features
 
 - 🤖 **Workbook-level agent (tool calling)**: The model works through a set of Excel tools and gets the result of every call back, so it can fix its own mistakes (duplicate sheet names, invalid ranges, `#NAME?` formula errors…):
-  - **Inspect:** `get_workbook_context` (sheets, selection, tables, charts, PivotTables, named ranges), `read_range` (limited per call; 2000 cells by default, configurable in Settings), `search_workbook`
-  - **Sheets & names:** `activate_worksheet`, `create_worksheet`, `rename_worksheet`, `create_named_range`
-  - **Data:** `write_table`, `convert_range_to_table`, `set_range_values_or_formulas` (live formulas: SUM, XLOOKUP, FILTER…), `clear_range`, `sort_range`, `filter_table`, `add_data_validation` (dropdowns and input rules)
-  - **Formatting:** `format_range` (fonts, fills, borders, number formats), `add_conditional_format` (color scales, data bars, icon sets, highlight rules)
-  - **Analysis:** `create_chart` (column, bar, line, pie, scatter, waterfall…), `create_pivot_table`
-- ✅ **Approval & undo**: Changes to the workbook are shown for approval before they're applied (can be turned off in Settings), and all changes from one request can be undone together.
+  - **Inspect & analyze:** `get_workbook_context` (sheets, selection, tables, charts, PivotTables, named ranges), `read_range` (2000 cells per call by default, configurable), `search_workbook`, `profile_data` (per-column statistics computed in the browser, for large data)
+  - **Formulas:** `trace_formula` (precedents/dependents, ExcelApi 1.12+), `find_formula_errors`
+  - **Sheets & names:** `activate_worksheet`, `create_worksheet`, `rename_worksheet`, `delete_worksheet`, `set_worksheet_visibility`, `create_named_range`
+  - **Data:** `write_table`, `convert_range_to_table`, `import_attachment`, `set_range_values_or_formulas` (live formulas: SUM, XLOOKUP, FILTER…), `clear_range`, `copy_range` (copy/move, paste values/formats, transpose), `fill_range`, `find_replace`, `remove_duplicates`, `insert_range` / `delete_range` (rows, columns, cells), `sort_range`, `filter_table`, `add_data_validation`
+  - **Formatting & layout:** `format_range`, `add_conditional_format`, `set_rows_columns` (widths, heights, hide/unhide), `freeze_panes`, `merge_cells`, `add_comment`
+  - **Charts & PivotTables:** `create_chart`, `update_chart`, `delete_chart`, `create_pivot_table`, `update_pivot_table`, `delete_pivot_table`
+  - Tools that need a newer Excel than the one running are hidden from the model automatically.
+- 💬 **Chat**: answers stream in as they are generated and are rendered as Markdown; cell references like `Sales!B5` are clickable and select the range. Each request ends with a list of the changes made, linked to the affected ranges.
+- 📎 **Attachments**: CSV, TSV, JSON and text files are parsed in the browser (large files are imported directly into the workbook without passing through the model); images and PDFs are sent to models that accept them. Images can also be pasted.
+- ✅ **Approval & undo**: Changes are shown for approval with a before → after preview of the cells (can be turned off in Settings; irreversible actions such as deleting a chart always ask). All changes from one request can be undone together, including deleted sheets (kept as a hidden backup while they can be undone).
+- 💾 **Per-workbook history**: the conversation and the undo history are saved in the browser per workbook and restored when the add-in is reopened.
+- 🧩 **Robust agent**: long conversations are summarized automatically, failed requests (rate limits, server errors) are retried, models without tool support are flagged, prompt caching is used for Anthropic models on OpenRouter, and custom instructions (with templates for finance, accounting, data cleaning…) are added to every request.
 - 🧠 **Bring Your Own AI**: Any OpenAI-compatible API with tool calling:
   - **OpenRouter** (default, model `deepseek/deepseek-chat`; also e.g. `anthropic/claude-3.5-sonnet`, `meta-llama/llama-3.3-70b-instruct`)
   - **Google Gemini**, **OpenCode Zen**, **LM Studio** (local models), or any **custom** endpoint (Groq, Together AI…)
@@ -68,7 +74,9 @@ npm run lint
 Code layout:
 
 - `src/agent/tools.ts` – JSON schemas of the tools sent to the model
-- `src/agent/excel/` – Office.js executors (`workbookTools`, `dataTools`, `formatTools`, `analysisTools`) and the undo journal (`undo.ts`)
+- `src/agent/excel/` – Office.js executors (`workbookTools`, `dataTools`, `editTools`, `structureTools`, `formatTools`, `formulaTools`, `analysisTools`, `insightTools`), approval previews (`preview.ts`) and the undo journal (`undo.ts`)
+- `src/agent/context.ts` – conversation size control and summarization
+- `src/agent/attachments.ts` – file parsing for attachments
 - `src/agent/llmClient.ts` – OpenAI-compatible chat completions client
 - `src/agent/agentLoop.ts` – `runAgentLoop`: inference → tool dispatch → feedback loop
 - `src/components/` – chat and settings task pane UI

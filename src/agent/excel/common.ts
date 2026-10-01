@@ -13,6 +13,38 @@ export type Executor = (context: Excel.RequestContext, args: Args, options: Tool
 
 export const DEFAULT_TABLE_STYLE = 'TableStyleMedium2';
 
+/** Deleted sheets are kept as very hidden copies with this prefix until their undo expires. */
+export const BACKUP_SHEET_PREFIX = '__xlai_bak_';
+export const isBackupSheet = (name: string) => name.startsWith(BACKUP_SHEET_PREFIX);
+
+/** All worksheets except internal backups. */
+export const loadUserSheets = async (context: Excel.RequestContext, properties = 'items/name') => {
+  const sheets = context.workbook.worksheets;
+  sheets.load(properties);
+  await context.sync();
+  return sheets.items.filter(s => !isBackupSheet(s.name));
+};
+
+/** Whether this Excel supports the given ExcelApi requirement set (assumed outside Office, e.g. in tests). */
+export const isApiSupported = (version: string): boolean => {
+  try {
+    if (typeof Office === 'undefined' || !Office.context?.requirements) return true;
+    return Office.context.requirements.isSetSupported('ExcelApi', version);
+  } catch {
+    return true;
+  }
+};
+
+export const requireApi = (version: string, feature: string) => {
+  if (!isApiSupported(version)) throw new ToolError(`${feature} requires ExcelApi ${version}, which this version of Excel does not support.`);
+};
+
+/** Where a tool's change happened, so the chat can link to it. */
+export interface ChangeLocation {
+  sheet: string;
+  address: string;
+}
+
 // ---------------------------------------------------------------------------
 // Argument helpers
 // ---------------------------------------------------------------------------

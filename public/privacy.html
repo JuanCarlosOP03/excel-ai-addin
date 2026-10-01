@@ -21,11 +21,13 @@
         <h2>2. Data Collection and Storage</h2>
         <p><strong>We do not collect, store, or transmit your data to any of our own servers.</strong></p>
         <p>The Excel AI add-in is a client-side application. All settings, including your API keys and configuration preferences, are stored locally within your browser's local storage. Browser local storage is not encrypted, and it is shared by all pages served from the same web address (origin) as the add-in.</p>
+        <p>The conversation and the undo history of each workbook are stored in the browser's IndexedDB on your device so they can be restored when you reopen the add-in. A random identifier is saved in the workbook's add-in settings to recognize it. Use "New chat" to delete a workbook's stored conversation. To allow deleted sheets to be restored, a hidden copy of each deleted sheet is kept in the workbook while the deletion can still be undone.</p>
         
         <h2>3. Third-Party Services</h2>
         <p>The add-in communicates directly with third-party Artificial Intelligence providers (e.g., OpenRouter, Google Gemini, OpenCode, Groq) based on the API keys and endpoints you configure. When you send a message, the following is sent directly to the provider you selected:</p>
         <ul>
-            <li>Your chat messages and the conversation history of the current session.</li>
+            <li>Your chat messages and the conversation history (older parts may be sent as a summary).</li>
+            <li>Files you attach: images and PDFs are sent as they are; for CSV, JSON and text files, a preview or the parts the assistant reads.</li>
             <li>The structure of your workbook: sheet names, used-range sizes, the selected range address, table names and header rows, and a few sample rows of the active sheet.</li>
             <li>The contents of any range the assistant reads with its tools while answering your request, and the results of the changes it makes.</li>
         </ul>

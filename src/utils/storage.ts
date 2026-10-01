@@ -1,10 +1,21 @@
 export type ProviderId = 'openrouter' | 'gemini' | 'lmstudio' | 'opencode' | 'custom';
 
+/** Capabilities reported by the provider's model list (unknown when undefined). */
+export interface ModelInfo {
+  id: string;
+  supportsTools?: boolean;
+  supportsImages?: boolean;
+  supportsFiles?: boolean;
+  contextLength?: number;
+}
+
 export interface ProviderConfig {
   baseUrl: string;
   apiKey: string;
   model: string;
   useProxy: boolean;
+  /** Capabilities of `model`, when it was picked from a loaded model list. */
+  modelInfo?: ModelInfo;
 }
 
 export interface AppSettings {
@@ -14,15 +25,27 @@ export interface AppSettings {
   autoApprove: boolean;
   /** Maximum number of cells returned by one read_range call. */
   maxReadCells: number;
+  /** Show the answer while it is being generated. */
+  streaming: boolean;
+  /** Extra instructions added to the system prompt (language, conventions, domain rules). */
+  customInstructions: string;
+  /** Approximate conversation size (tokens) above which older turns are summarized. */
+  maxContextTokens: number;
 }
 
-export const READ_CELLS_LIMITS = { min: 100, max: 50000, default: 2000 };
-
-export const clampReadCells = (value: unknown): number => {
+const clamp = (limits: { min: number; max: number; default: number }) => (value: unknown): number => {
   const n = Math.round(Number(value));
-  if (!Number.isFinite(n) || n <= 0) return READ_CELLS_LIMITS.default;
-  return Math.min(READ_CELLS_LIMITS.max, Math.max(READ_CELLS_LIMITS.min, n));
+  if (!Number.isFinite(n) || n <= 0) return limits.default;
+  return Math.min(limits.max, Math.max(limits.min, n));
 };
+
+export const READ_CELLS_LIMITS = { min: 100, max: 50000, default: 2000 };
+export const clampReadCells = clamp(READ_CELLS_LIMITS);
+
+export const CONTEXT_TOKEN_LIMITS = { min: 8000, max: 1000000, default: 64000 };
+export const clampContextTokens = clamp(CONTEXT_TOKEN_LIMITS);
+
+export const MAX_CUSTOM_INSTRUCTIONS = 4000;
 
 export interface ProviderInfo {
   label: string;
@@ -104,6 +127,9 @@ export const createDefaultSettings = (): AppSettings => ({
   providers: Object.fromEntries(PROVIDER_IDS.map(id => [id, defaultProviderConfig(id)])) as Record<ProviderId, ProviderConfig>,
   autoApprove: false,
   maxReadCells: READ_CELLS_LIMITS.default,
+  streaming: true,
+  customInstructions: '',
+  maxContextTokens: CONTEXT_TOKEN_LIMITS.default,
 });
 
 const isProviderId = (value: unknown): value is ProviderId =>
@@ -116,10 +142,14 @@ const mergeSettings = (stored: Partial<AppSettings>): AppSettings => {
   if (isProviderId(stored.provider)) settings.provider = stored.provider;
   settings.autoApprove = stored.autoApprove === true;
   settings.maxReadCells = clampReadCells(stored.maxReadCells);
+  settings.streaming = stored.streaming !== false;
+  settings.customInstructions = str(stored.customInstructions, '').slice(0, MAX_CUSTOM_INSTRUCTIONS);
+  settings.maxContextTokens = clampContextTokens(stored.maxContextTokens);
   for (const id of PROVIDER_IDS) {
     const saved = stored.providers?.[id];
     if (saved) settings.providers[id] = { ...settings.providers[id], ...saved };
     if (!PROVIDERS[id].editableBaseUrl) settings.providers[id].baseUrl = PROVIDERS[id].defaultBaseUrl;
+    if (settings.providers[id].modelInfo?.id !== settings.providers[id].model) delete settings.providers[id].modelInfo;
   }
   return settings;
 };

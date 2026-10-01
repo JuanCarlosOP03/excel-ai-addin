@@ -3,6 +3,7 @@ import {
   ToolError,
   cellAt,
   getSheet,
+  loadUserSheets,
   localAddress,
   optionalBoolean,
   optionalString,
@@ -23,13 +24,11 @@ const MAX_SEARCH_RESULTS = 100;
 const MAX_SEARCH_VALUES = 5000;
 
 const loadSheets = async (context: Excel.RequestContext) => {
-  const sheets = context.workbook.worksheets;
-  sheets.load('items/name, items/visibility');
-  const active = sheets.getActiveWorksheet();
+  const active = context.workbook.worksheets.getActiveWorksheet();
   active.load('name');
-  await context.sync();
+  const sheets = await loadUserSheets(context, 'items/name, items/visibility');
 
-  const used = sheets.items.map(sheet => {
+  const used = sheets.map(sheet => {
     const range = sheet.getUsedRangeOrNullObject(true);
     range.load('address, rowCount, columnCount');
     return { sheet, range };
@@ -192,10 +191,7 @@ export const searchWorkbook = async (context: Excel.RequestContext, args: Args) 
   if (sheetName) {
     sheets = [await getSheet(context, sheetName)];
   } else {
-    const collection = context.workbook.worksheets;
-    collection.load('items/name');
-    await context.sync();
-    sheets = collection.items;
+    sheets = await loadUserSheets(context);
   }
 
   const found = sheets.map(sheet => {

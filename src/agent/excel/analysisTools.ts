@@ -3,6 +3,7 @@ import {
   getSheet,
   localAddress,
   matchName,
+  optionalBoolean,
   optionalEnum,
   optionalNumber,
   optionalString,
@@ -12,7 +13,7 @@ import {
   stringList,
   type Args,
 } from './common';
-import { recordUndo } from './undo';
+import { recordUndo, type PivotLayout } from './undo';
 
 export const CHART_TYPES = [
   'ColumnClustered', 'ColumnStacked', 'ColumnStacked100',
@@ -177,4 +178,194 @@ export const createPivotTable = async (context: Excel.RequestContext, args: Args
     filters: filterFields,
     values: valueFields.map(v => `${v.summarizeBy ?? 'Sum'} of ${v.field}`),
   };
+};
+
+const getChart = async (context: Excel.RequestContext, sheet: Excel.Worksheet, name: string) => {
+  const chart = sheet.charts.getItemOrNullObject(name);
+  await context.sync();
+  if (chart.isNullObject) {
+    sheet.charts.load('items/name');
+    await context.sync();
+    const names = sheet.charts.items.map(c => `"${c.name}"`).join(', ');
+    throw new ToolError(`Chart "${name}" was not found on sheet "${sheet.name}". ${names ? `Charts there: ${names}.` : 'That sheet has no charts.'}`);
+  }
+  return chart;
+};
+
+export const updateChart = async (context: Excel.RequestContext, args: Args) => {
+  const sheet = await getSheet(context, requireString(args, 'sheet_name'));
+  const chart = await getChart(context, sheet, requireString(args, 'chart_name'));
+  const chartType = optionalEnum(args, 'chart_type', CHART_TYPES);
+  const seriesBy = optionalEnum(args, 'series_by', ['Auto', 'Rows', 'Columns'] as const) ?? 'Auto';
+  const legend = optionalEnum(args, 'legend_position', LEGEND_POSITIONS);
+  const dataRange = optionalString(args, 'data_range');
+  const title = typeof args.title === 'string' ? args.title.trim() : undefined;
+  const anchorCell = optionalString(args, 'anchor_cell');
+  const newName = optionalString(args, 'new_name');
+
+  chart.load('name, chartType, top, left, width, height, title/text, title/visible, legend/visible, legend/position');
+  await context.sync();
+  const undoStep = {
+    kind: 'chartProps' as const,
+    sheetName: sheet.name,
+    chartName: chart.name,
+    props: {
+      name: chart.name,
+      chartType: chart.chartType,
+      title: chart.title.visible ? chart.title.text : null,
+      legendVisible: chart.legend.visible,
+      legendPosition: chart.legend.position,
+      top: chart.top,
+      left: chart.left,
+      width: chart.width,
+      height: chart.height,
+    },
+  };
+  recordUndo(undoStep);
+
+  if (chartType) chart.chartType = chartType;
+  if (dataRange) {
+    const { range } = await resolveRange(context, { sheet_name: sheet.name, data_range: dataRange }, 'data_range');
+    chart.setData(range, seriesBy);
+  }
+  if (title !== undefined) {
+    chart.title.text = title;
+    chart.title.visible = title !== '';
+  }
+  if (!CHARTS_WITHOUT_AXES.has(chartType ?? chart.chartType)) {
+    const xTitle = optionalString(args, 'x_axis_title');
+    const yTitle = optionalString(args, 'y_axis_title');
+    if (xTitle) chart.axes.categoryAxis.title.text = xTitle;
+    if (yTitle) chart.axes.valueAxis.title.text = yTitle;
+  }
+  if (legend === 'None') {
+    chart.legend.visible = false;
+  } else if (legend) {
+    chart.legend.visible = true;
+    chart.legend.position = legend;
+  }
+  if (anchorCell) chart.setPosition(sheet.getRange(localAddress(anchorCell)));
+  const width = optionalNumber(args, 'width');
+  const height = optionalNumber(args, 'height');
+  if (width) chart.width = width;
+  if (height) chart.height = height;
+  if (newName) chart.name = newName;
+  await context.sync();
+  if (newName) undoStep.chartName = newName;
+
+  return {
+    chart: newName ?? undoStep.props.name,
+    sheet: sheet.name,
+    updated: Object.keys(args).filter(k => !['sheet_name', 'chart_name'].includes(k)),
+    ...(dataRange ? { note: 'Undo restores the chart settings but not its previous data range.' } : {}),
+  };
+};
+
+export const deleteChart = async (context: Excel.RequestContext, args: Args) => {
+  const sheet = await getSheet(context, requireString(args, 'sheet_name'));
+  const chart = await getChart(context, sheet, requireString(args, 'chart_name'));
+  chart.load('name');
+  await context.sync();
+  const name = chart.name;
+  chart.delete();
+  await context.sync();
+  return { deleted: name, sheet: sheet.name, undoAvailable: false };
+};
+
+const getPivot = async (context: Excel.RequestContext, name: string) => {
+  const pivot = context.workbook.pivotTables.getItemOrNullObject(name);
+  await context.sync();
+  if (pivot.isNullObject) {
+    const pivots = context.workbook.pivotTables;
+    pivots.load('items/name');
+    await context.sync();
+    const names = pivots.items.map(p => `"${p.name}"`).join(', ');
+    throw new ToolError(`PivotTable "${name}" does not exist. ${names ? `PivotTables: ${names}.` : 'The workbook has no PivotTables.'}`);
+  }
+  pivot.load('name');
+  return pivot;
+};
+
+const captureLayout = async (context: Excel.RequestContext, pivot: Excel.PivotTable): Promise<PivotLayout> => {
+  pivot.rowHierarchies.load('items/name');
+  pivot.columnHierarchies.load('items/name');
+  pivot.filterHierarchies.load('items/name');
+  pivot.dataHierarchies.load('items/name, items/summarizeBy, items/numberFormat, items/field/name');
+  await context.sync();
+  return {
+    rows: pivot.rowHierarchies.items.map(h => h.name),
+    columns: pivot.columnHierarchies.items.map(h => h.name),
+    filters: pivot.filterHierarchies.items.map(h => h.name),
+    values: pivot.dataHierarchies.items.map(h => ({ field: h.field.name, name: h.name, summarizeBy: h.summarizeBy, numberFormat: h.numberFormat })),
+  };
+};
+
+const sameName = (a: string, b: string | undefined) => a.toLowerCase() === b?.toLowerCase();
+
+export const updatePivotTable = async (context: Excel.RequestContext, args: Args) => {
+  const pivot = await getPivot(context, requireString(args, 'name'));
+  const addRows = stringList(args, 'add_rows');
+  const addColumns = stringList(args, 'add_columns');
+  const addFilters = stringList(args, 'add_filters');
+  const addValues = parseValueFields({ values: args.add_values });
+  const removeFields = stringList(args, 'remove_fields');
+  const refresh = optionalBoolean(args, 'refresh') ?? false;
+  if (!refresh && [addRows, addColumns, addFilters, addValues, removeFields].every(list => list.length === 0)) {
+    throw new ToolError('Nothing to change: provide fields to add or remove, or "refresh": true.');
+  }
+
+  pivot.hierarchies.load('items/name');
+  const layout = await captureLayout(context, pivot);
+  const field = (name: string) => matchName(pivot.hierarchies.items.map(h => h.name), name, 'field');
+  // Validate everything before changing anything.
+  const rows = addRows.map(field);
+  const columns = addColumns.map(field);
+  const filters = addFilters.map(field);
+  const values = addValues.map(v => ({ ...v, field: field(v.field) }));
+  const inUse = [...new Set([...layout.rows, ...layout.columns, ...layout.filters, ...layout.values.flatMap(v => [v.name, v.field])])];
+  const removals = removeFields.map(name => matchName(inUse, name, 'field in this PivotTable'));
+
+  recordUndo({ kind: 'pivotLayout', pivotName: pivot.name, layout });
+
+  if (removals.length) {
+    const removed = (name: string, fieldName?: string) => removals.some(r => sameName(r, name) || sameName(r, fieldName));
+    pivot.rowHierarchies.items.filter(h => removed(h.name)).forEach(h => pivot.rowHierarchies.remove(h));
+    pivot.columnHierarchies.items.filter(h => removed(h.name)).forEach(h => pivot.columnHierarchies.remove(h));
+    pivot.filterHierarchies.items.filter(h => removed(h.name)).forEach(h => pivot.filterHierarchies.remove(h));
+    pivot.dataHierarchies.items.filter(h => removed(h.name, h.field.name)).forEach(h => pivot.dataHierarchies.remove(h));
+    await context.sync();
+  }
+  rows.forEach(f => pivot.rowHierarchies.add(pivot.hierarchies.getItem(f)));
+  columns.forEach(f => pivot.columnHierarchies.add(pivot.hierarchies.getItem(f)));
+  filters.forEach(f => pivot.filterHierarchies.add(pivot.hierarchies.getItem(f)));
+  for (const v of values) {
+    const data = pivot.dataHierarchies.add(pivot.hierarchies.getItem(v.field));
+    if (v.summarizeBy) data.summarizeBy = v.summarizeBy;
+    if (v.numberFormat) data.numberFormat = v.numberFormat;
+    if (v.name) data.name = v.name;
+  }
+  if (refresh) pivot.refresh();
+  const range = pivot.layout.getRange();
+  range.load('address');
+  const sheet = pivot.worksheet;
+  sheet.load('name');
+  await context.sync();
+
+  return {
+    pivotTable: pivot.name,
+    sheet: sheet.name,
+    address: localAddress(range.address),
+    removed: removals,
+    added: { rows, columns, filters, values: values.map(v => `${v.summarizeBy ?? 'Sum'} of ${v.field}`) },
+    ...(refresh ? { refreshed: true } : {}),
+  };
+};
+
+export const deletePivotTable = async (context: Excel.RequestContext, args: Args) => {
+  const pivot = await getPivot(context, requireString(args, 'name'));
+  await context.sync();
+  const name = pivot.name;
+  pivot.delete();
+  await context.sync();
+  return { deleted: name, undoAvailable: false };
 };
