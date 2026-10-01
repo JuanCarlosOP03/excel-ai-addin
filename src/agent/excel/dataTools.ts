@@ -19,6 +19,7 @@ import {
   type Args,
 } from './common';
 import { recordUndo, snapshotRange, type RangeSnapshot } from './undo';
+import { repairCollapsed } from './structureTools';
 
 const MAX_RETURNED_RESULTS = 50;
 
@@ -68,6 +69,7 @@ export const writeTable = async (context: Excel.RequestContext, args: Args) => {
   target.format.autofitColumns();
   body.load('address, values, valueTypes');
   await context.sync();
+  await repairCollapsed(context, sheet, target, { rows: true, columns: true });
 
   const formulaErrors = collectFormulaErrors(body);
   return {

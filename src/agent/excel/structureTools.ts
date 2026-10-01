@@ -116,17 +116,82 @@ const captureDimensions = async (range: Excel.Range, kind: 'columns' | 'rows', c
   }));
 };
 
+const MAX_ROW_HEIGHT = 409;
+const MAX_COLUMN_WIDTH = 1700;
+/** Excel's default column width (8.43 characters) in points. */
+const DEFAULT_COLUMN_WIDTH = 48;
+const MAX_REPAIR_CHECK = 5000;
+
+/** Validates a row height / column width in points. 0 would hide the row or column. */
+const optionalSize = (args: Args, key: string, max: number): number | undefined => {
+  const value = optionalNumber(args, key);
+  if (value === undefined) return undefined;
+  if (value <= 0) {
+    throw new ToolError(`"${key}" must be greater than 0 (in points). A size of 0 hides the row/column: use "hidden": true to hide it, or "autofit_rows"/"autofit_columns" for automatic sizing.`);
+  }
+  return Math.min(value, max);
+};
+
+/**
+ * Rows or columns that end up with zero size without being hidden on purpose look like they
+ * disappeared (some models send 0 meaning "automatic", and auto-fit can collapse empty rows on
+ * some hosts). Restores them to the sheet's standard row height / a default column width.
+ */
+export const repairCollapsed = async (
+  context: Excel.RequestContext,
+  sheet: Excel.Worksheet,
+  range: Excel.Range,
+  check: { rows?: boolean; columns?: boolean }
+): Promise<number> => {
+  range.load('rowCount, columnCount');
+  sheet.load('standardHeight');
+  await context.sync();
+  const rows = check.rows && range.rowCount <= MAX_REPAIR_CHECK
+    ? Array.from({ length: range.rowCount }, (_, i) => {
+      const part = range.getRow(i);
+      part.load('format/rowHeight');
+      return part;
+    })
+    : [];
+  const columns = check.columns && range.columnCount <= MAX_REPAIR_CHECK
+    ? Array.from({ length: range.columnCount }, (_, i) => {
+      const part = range.getColumn(i);
+      part.load('format/columnWidth');
+      return part;
+    })
+    : [];
+  if (rows.length === 0 && columns.length === 0) return 0;
+  await context.sync();
+
+  let repaired = 0;
+  for (const part of rows) {
+    if (part.format.rowHeight <= 0) {
+      part.format.rowHeight = sheet.standardHeight || 15;
+      repaired++;
+    }
+  }
+  for (const part of columns) {
+    if (part.format.columnWidth <= 0) {
+      part.format.columnWidth = DEFAULT_COLUMN_WIDTH;
+      repaired++;
+    }
+  }
+  if (repaired) await context.sync();
+  return repaired;
+};
+
 export const setRowsColumns = async (context: Excel.RequestContext, args: Args) => {
   const hidden = optionalBoolean(args, 'hidden');
-  const columnWidth = optionalNumber(args, 'column_width');
-  const rowHeight = optionalNumber(args, 'row_height');
   const autofitColumns = optionalBoolean(args, 'autofit_columns');
   const autofitRows = optionalBoolean(args, 'autofit_rows');
+  // A size sent together with auto-fit (often 0, meaning "auto") is ignored in favor of auto-fit.
+  const columnWidth = autofitColumns ? undefined : optionalSize(args, 'column_width', MAX_COLUMN_WIDTH);
+  const rowHeight = autofitRows ? undefined : optionalSize(args, 'row_height', MAX_ROW_HEIGHT);
   if ([hidden, columnWidth, rowHeight, autofitColumns, autofitRows].every(v => v === undefined)) {
     throw new ToolError('Provide at least one of hidden, column_width, row_height, autofit_columns, autofit_rows.');
   }
 
-  const { sheetName, range } = await resolveRange(context, args, 'range_address');
+  const { sheet, sheetName, range } = await resolveRange(context, args, 'range_address');
   const address = localAddress(range.address);
   const rowsTarget = isEntireRows(address) || rowHeight !== undefined || autofitRows;
   const columnsTarget = isEntireColumns(address) || columnWidth !== undefined || autofitColumns;
@@ -147,7 +212,18 @@ export const setRowsColumns = async (context: Excel.RequestContext, args: Args) 
   if (autofitColumns) range.format.autofitColumns();
   if (autofitRows) range.format.autofitRows();
   await context.sync();
-  return { sheet: sheetName, address, undoAvailable: undoable };
+
+  // Only rows/columns that were resized (not deliberately hidden) are checked.
+  const repaired = await repairCollapsed(context, sheet, range, {
+    rows: (rowHeight !== undefined || autofitRows) && !(hideRows && hidden),
+    columns: (columnWidth !== undefined || autofitColumns) && !(hideColumns && hidden),
+  });
+  return {
+    sheet: sheetName,
+    address,
+    undoAvailable: undoable,
+    ...(repaired ? { note: `${repaired} rows/columns had collapsed to zero size and were restored to the default size.` } : {}),
+  };
 };
 
 export const freezePanes = async (context: Excel.RequestContext, args: Args) => {

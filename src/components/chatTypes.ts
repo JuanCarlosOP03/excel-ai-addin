@@ -24,8 +24,10 @@ export interface ChangesItem {
 }
 
 export type ChatItem =
-  | { kind: 'user'; id: string; text: string; attachments?: string[] }
+  | { kind: 'user'; id: string; text: string; attachments?: string[]; skills?: string[] }
   | { kind: 'assistant'; id: string; text: string; streaming?: boolean }
+  /** The model's reasoning, shown collapsed. */
+  | { kind: 'thinking'; id: string; text: string; streaming?: boolean }
   | { kind: 'error' | 'info'; id: string; text: string }
   | ToolItem
   | ChangesItem;

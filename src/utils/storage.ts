@@ -6,8 +6,40 @@ export interface ModelInfo {
   supportsTools?: boolean;
   supportsImages?: boolean;
   supportsFiles?: boolean;
+  supportsReasoning?: boolean;
   contextLength?: number;
 }
+
+/** "default" sends nothing and lets the model decide; "none" turns reasoning off. */
+export type ReasoningEffort = 'default' | 'none' | 'low' | 'medium' | 'high';
+export const REASONING_EFFORTS: { value: ReasoningEffort; label: string }[] = [
+  { value: 'default', label: 'Default' },
+  { value: 'none', label: 'Off' },
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+];
+
+export interface FavoriteModel {
+  provider: ProviderId;
+  model: string;
+  /** Short name shown in the model picker. */
+  label: string;
+  modelInfo?: ModelInfo;
+}
+
+export const MAX_FAVORITES = 5;
+
+export interface CustomSkill {
+  id: string;
+  name: string;
+  /** When the agent should use it (shown to the model in the skill list). */
+  description: string;
+  instructions: string;
+}
+
+export const MAX_CUSTOM_SKILLS = 20;
+export const MAX_SKILL_INSTRUCTIONS = 8000;
 
 export interface ProviderConfig {
   baseUrl: string;
@@ -31,6 +63,10 @@ export interface AppSettings {
   customInstructions: string;
   /** Approximate conversation size (tokens) above which older turns are summarized. */
   maxContextTokens: number;
+  reasoningEffort: ReasoningEffort;
+  /** Up to MAX_FAVORITES models the user switches between from the chat. */
+  favorites: FavoriteModel[];
+  customSkills: CustomSkill[];
 }
 
 const clamp = (limits: { min: number; max: number; default: number }) => (value: unknown): number => {
@@ -130,6 +166,9 @@ export const createDefaultSettings = (): AppSettings => ({
   streaming: true,
   customInstructions: '',
   maxContextTokens: CONTEXT_TOKEN_LIMITS.default,
+  reasoningEffort: 'default',
+  favorites: [],
+  customSkills: [],
 });
 
 const isProviderId = (value: unknown): value is ProviderId =>
@@ -145,6 +184,15 @@ const mergeSettings = (stored: Partial<AppSettings>): AppSettings => {
   settings.streaming = stored.streaming !== false;
   settings.customInstructions = str(stored.customInstructions, '').slice(0, MAX_CUSTOM_INSTRUCTIONS);
   settings.maxContextTokens = clampContextTokens(stored.maxContextTokens);
+  if (REASONING_EFFORTS.some(e => e.value === stored.reasoningEffort)) settings.reasoningEffort = stored.reasoningEffort!;
+  settings.favorites = (Array.isArray(stored.favorites) ? stored.favorites : [])
+    .filter(f => f && isProviderId(f.provider) && typeof f.model === 'string' && f.model.trim())
+    .slice(0, MAX_FAVORITES)
+    .map(f => ({ provider: f.provider, model: f.model.trim(), label: str(f.label, '').trim() || f.model.trim(), ...(f.modelInfo?.id === f.model ? { modelInfo: f.modelInfo } : {}) }));
+  settings.customSkills = (Array.isArray(stored.customSkills) ? stored.customSkills : [])
+    .filter(s => s && typeof s.id === 'string' && typeof s.name === 'string' && typeof s.instructions === 'string')
+    .slice(0, MAX_CUSTOM_SKILLS)
+    .map(s => ({ id: s.id, name: s.name, description: str(s.description, ''), instructions: s.instructions.slice(0, MAX_SKILL_INSTRUCTIONS) }));
   for (const id of PROVIDER_IDS) {
     const saved = stored.providers?.[id];
     if (saved) settings.providers[id] = { ...settings.providers[id], ...saved };
@@ -195,6 +243,23 @@ export const loadSettings = (): AppSettings => {
     console.error('Failed to load settings', e);
   }
   return createDefaultSettings();
+};
+
+/** Makes a favorite the active model. */
+export const applyFavorite = (settings: AppSettings, favorite: FavoriteModel): AppSettings => ({
+  ...settings,
+  provider: favorite.provider,
+  providers: {
+    ...settings.providers,
+    [favorite.provider]: { ...settings.providers[favorite.provider], model: favorite.model, modelInfo: favorite.modelInfo },
+  },
+});
+
+/** Short display name of the active model: its favorite label, or the last part of its id. */
+export const activeModelLabel = (settings: AppSettings): string => {
+  const { model } = settings.providers[settings.provider];
+  const favorite = settings.favorites.find(f => f.provider === settings.provider && f.model === model);
+  return favorite?.label || model.split('/').pop() || model || 'No model';
 };
 
 export const saveSettings = (settings: AppSettings) => {

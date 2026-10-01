@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { Button, Spinner, Textarea, makeStyles, mergeClasses, tokens } from '@fluentui/react-components';
-import { loadSettings } from '../utils/storage';
+import { Button, ProgressBar, Textarea, makeStyles, mergeClasses, tokens } from '@fluentui/react-components';
+import { MAX_FAVORITES, applyFavorite, loadSettings, saveSettings, activeModelLabel, type AppSettings } from '../utils/storage';
 import { debounce, getWorkbookId, kvDelete, kvGet, kvSet } from '../utils/persistence';
 import { runAgentLoop, type AgentEvent, type ApprovalDecision, type ApprovalRequest } from '../agent/agentLoop';
 import {
@@ -15,8 +15,10 @@ import {
 import { readAttachment, type Attachment } from '../agent/attachments';
 import { stripBinaryContent } from '../agent/context';
 import type { ChatMessage } from '../agent/llmClient';
+import { findSkill, getSkills, type Skill } from '../agent/skills';
 import { Markdown } from './Markdown';
 import { ChangesCard, ToolCard } from './ToolCard';
+import { EffortMenu, ModelMenu, SkillsMenu } from './ComposerControls';
 import type { ChangesItem, ChatItem, ToolItem } from './chatTypes';
 
 const useStyles = makeStyles({
@@ -131,15 +133,95 @@ const useStyles = makeStyles({
     display: 'flex',
     gap: '6px',
     alignItems: 'flex-end',
-    padding: '8px',
+    padding: '8px 8px 4px',
   },
   input: {
+    flex: 1,
+  },
+  toolbar: {
+    display: 'flex',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: '2px',
+    padding: '0 4px 4px',
+  },
+  spacer: {
     flex: 1,
   },
   hiddenInput: {
     display: 'none',
   },
+  activity: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px',
+    padding: '6px 10px',
+    borderRadius: tokens.borderRadiusLarge,
+    backgroundColor: tokens.colorBrandBackground2,
+    color: tokens.colorBrandForeground2,
+    fontSize: tokens.fontSizeBase200,
+  },
+  activityAwaiting: {
+    backgroundColor: tokens.colorPaletteMarigoldBackground1,
+    color: tokens.colorPaletteMarigoldForeground2,
+  },
+  activityLine: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+  },
+  activityText: {
+    flex: 1,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
+  pulse: {
+    width: '8px',
+    height: '8px',
+    borderRadius: '50%',
+    flexShrink: 0,
+    backgroundColor: 'currentColor',
+    animationName: {
+      '0%': { opacity: 1, transform: 'scale(1)' },
+      '50%': { opacity: 0.3, transform: 'scale(0.7)' },
+      '100%': { opacity: 1, transform: 'scale(1)' },
+    },
+    animationDuration: '1.2s',
+    animationIterationCount: 'infinite',
+  },
+  elapsed: {
+    fontVariantNumeric: 'tabular-nums',
+    opacity: 0.8,
+  },
+  thinking: {
+    alignSelf: 'stretch',
+    fontSize: tokens.fontSizeBase200,
+    color: tokens.colorNeutralForeground3,
+    '& summary': { cursor: 'pointer' },
+  },
+  thinkingText: {
+    whiteSpace: 'pre-wrap',
+    maxHeight: '200px',
+    overflowY: 'auto',
+    margin: '4px 0 0',
+    paddingLeft: '8px',
+    borderLeft: `2px solid ${tokens.colorNeutralStroke2}`,
+  },
 });
+
+/** Splits leading "/skill" commands off the message: "/dashboard sales by region". */
+const parseSkillCommands = (text: string, settings: AppSettings): { text: string; skills: Skill[] } => {
+  const skills: Skill[] = [];
+  let rest = text;
+  for (let match = /^\/(\S+)\s*/.exec(rest); match; match = /^\/(\S+)\s*/.exec(rest)) {
+    const skill = findSkill(settings, match[1]);
+    if (!skill) break;
+    if (!skills.includes(skill)) skills.push(skill);
+    rest = rest.slice(match[0].length);
+  }
+  return { text: rest.trim() || text, skills };
+};
 
 interface StoredChat {
   items: ChatItem[];
@@ -153,20 +235,35 @@ const saveChat = debounce(({ key, chat }: { key: string; chat: StoredChat }) => 
 let lastItemId = 0;
 const newId = () => `${Date.now().toString(36)}-${++lastItemId}`;
 
+const formatElapsed = (ms: number) => {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, '0')}s`;
+};
+
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /** Items restored from storage can't still be running. */
 const settleItems = (items: ChatItem[]): ChatItem[] =>
   items.map(item => {
-    if (item.kind === 'assistant' && item.streaming) return { ...item, streaming: false };
+    if ((item.kind === 'assistant' || item.kind === 'thinking') && item.streaming) return { ...item, streaming: false };
     if (item.kind === 'tool' && (item.status === 'running' || item.status === 'awaiting_approval')) {
       return { ...item, status: 'error', detail: 'Not executed.', args: undefined, preview: undefined };
     }
     return item;
   });
 
-export const Chat: React.FC = () => {
+interface ChatProps {
+  onOpenSettings: () => void;
+}
+
+export const Chat: React.FC<ChatProps> = ({ onOpenSettings }) => {
   const styles = useStyles();
+  const [settings, setSettings] = useState<AppSettings>(loadSettings);
+  const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
+  // What the agent is doing right now, shown in the activity bar while it runs.
+  const [activity, setActivity] = useState('');
+  const [startedAt, setStartedAt] = useState(0);
+  const [now, setNow] = useState(0);
   const [input, setInput] = useState('');
   const [items, setItems] = useState<ChatItem[]>([]);
   const [isRunning, setIsRunning] = useState(false);
@@ -237,6 +334,13 @@ export const Chat: React.FC = () => {
     };
   }, []);
 
+  // Ticks once per second while running so the elapsed time shows the agent is alive.
+  useEffect(() => {
+    if (!isRunning) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [isRunning]);
+
   const addItem = (item: ChatItem) => setItems(prev => [...prev, item]);
   const updateItem = (id: string | undefined | null, patch: Partial<ChatItem>) =>
     setItems(prev => prev.map(item => (item.id === id ? ({ ...item, ...patch } as ChatItem) : item)));
@@ -256,14 +360,44 @@ export const Chat: React.FC = () => {
     }
   };
 
+  const updateSettings = (next: AppSettings) => {
+    setSettings(next);
+    saveSettings(next);
+  };
+
+  const addCurrentToFavorites = () => {
+    const config = settings.providers[settings.provider];
+    if (settings.favorites.length >= MAX_FAVORITES || !config.model) return;
+    updateSettings({
+      ...settings,
+      favorites: [...settings.favorites, { provider: settings.provider, model: config.model, label: activeModelLabel(settings), modelInfo: config.modelInfo }],
+    });
+  };
+
   const handleSend = async () => {
-    const text = input.trim();
-    if (!text || isRunning) return;
+    const raw = input.trim();
+    if (!raw || isRunning) return;
+    const command = parseSkillCommands(raw, settings);
+    const text = command.text;
+    const skills = [...new Map([
+      ...selectedSkills.flatMap(id => findSkill(settings, id) ?? []),
+      ...command.skills,
+    ].map(s => [s.id, s])).values()];
     const sentAttachments = attachments;
     setInput('');
     setAttachments([]);
-    addItem({ kind: 'user', id: newId(), text, ...(sentAttachments.length ? { attachments: sentAttachments.map(a => a.name) } : {}) });
+    setSelectedSkills([]);
+    addItem({
+      kind: 'user',
+      id: newId(),
+      text,
+      ...(sentAttachments.length ? { attachments: sentAttachments.map(a => a.name) } : {}),
+      ...(skills.length ? { skills: skills.map(s => s.name) } : {}),
+    });
     setIsRunning(true);
+    setActivity('Reading the workbook…');
+    setStartedAt(Date.now());
+    setNow(Date.now());
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -272,10 +406,29 @@ export const Chat: React.FC = () => {
     const toolInfo = new Map<string, { summary: string; mutating: boolean }>();
     const changes: ChangesItem['entries'] = [];
     let streamingId: string | null = null;
+    let thinkingId: string | null = null;
 
     const onEvent = (event: AgentEvent) => {
       if (event.type !== 'status') setStatus('');
+      // Any output other than more reasoning ends the current thinking block.
+      if (event.type !== 'reasoning_delta' && event.type !== 'status' && thinkingId) {
+        updateItem(thinkingId, { streaming: false });
+        thinkingId = null;
+      }
+      if (event.type === 'reasoning_delta') setActivity('Thinking…');
+      if (event.type === 'assistant_delta') setActivity('Writing the answer…');
+      if (event.type === 'tool_call') setActivity(`${event.summary}…`);
+      if (event.type === 'tool_result') setActivity('Thinking about the next step…');
       switch (event.type) {
+        case 'reasoning_delta':
+          if (thinkingId) {
+            const id = thinkingId;
+            setItems(prev => prev.map(item => (item.id === id && item.kind === 'thinking' ? { ...item, text: item.text + event.delta } : item)));
+          } else {
+            thinkingId = newId();
+            addItem({ kind: 'thinking', id: thinkingId, text: event.delta, streaming: true });
+          }
+          break;
         case 'assistant_delta':
           if (streamingId) {
             const id = streamingId;
@@ -316,15 +469,17 @@ export const Chat: React.FC = () => {
       new Promise<ApprovalDecision>(resolve => {
         const id = toolItems.get(request.callId) ?? newId();
         updateItem(id, { status: 'awaiting_approval', args: request.args, preview: request.preview, irreversible: request.irreversible } as Partial<ToolItem>);
+        setActivity('Waiting for your approval…');
         approvalsRef.current.set(id, resolve);
       });
 
     try {
       const result = await runAgentLoop({
-        settings: loadSettings(),
+        settings,
         history: historyRef.current,
         userInput: text,
         attachments: sentAttachments,
+        skills,
         includeSelection: !selectionDismissed,
         onEvent,
         requestApproval,
@@ -349,6 +504,7 @@ export const Chat: React.FC = () => {
     if (!resolve) return;
     approvalsRef.current.delete(id);
     updateItem(id, { status: decision === 'reject' ? 'rejected' : 'running' });
+    setActivity(decision === 'reject' ? 'Thinking about the next step…' : 'Applying the change…');
     resolve(decision);
   };
 
@@ -389,11 +545,9 @@ export const Chat: React.FC = () => {
   };
 
   const awaitingApproval = items.some(item => item.kind === 'tool' && item.status === 'awaiting_approval');
-  const modelInfo = (() => {
-    const settings = loadSettings();
-    const config = settings.providers[settings.provider];
-    return config.modelInfo?.id === config.model ? config.modelInfo : undefined;
-  })();
+  const activeConfig = settings.providers[settings.provider];
+  const modelInfo = activeConfig.modelInfo?.id === activeConfig.model ? activeConfig.modelInfo : undefined;
+  const allSkills = getSkills(settings);
   const attachmentWarning =
     attachments.some(a => a.kind === 'image') && modelInfo?.supportsImages === false ? 'The selected model does not accept images.'
     : attachments.some(a => a.kind === 'pdf') && modelInfo?.supportsFiles === false && modelInfo?.supportsImages === false ? 'The selected model may not accept PDF files.'
@@ -411,10 +565,18 @@ export const Chat: React.FC = () => {
             <Markdown text={item.text} onCellClick={goToCell} />
           </div>
         );
+      case 'thinking':
+        return (
+          <details key={item.id} className={styles.thinking} open={item.streaming}>
+            <summary>{item.streaming ? '💭 Thinking…' : '💭 Thought process'}</summary>
+            <div className={styles.thinkingText}>{item.text}</div>
+          </details>
+        );
       case 'user':
         return (
           <div key={item.id} className={mergeClasses(styles.bubble, styles.user)}>
             {item.text}
+            {item.skills && <div className={styles.userAttachments}>🧩 {item.skills.join(', ')}</div>}
             {item.attachments && <div className={styles.userAttachments}>📎 {item.attachments.join(', ')}</div>}
           </div>
         );
@@ -425,7 +587,6 @@ export const Chat: React.FC = () => {
     }
   };
 
-  const streaming = items.some(item => item.kind === 'assistant' && item.streaming);
 
   return (
     <div className={styles.container}>
@@ -440,8 +601,6 @@ export const Chat: React.FC = () => {
           </div>
         )}
         {items.map(renderItem)}
-        {isRunning && !awaitingApproval && !streaming && <Spinner size="tiny" label={status || 'Working…'} labelPosition="after" />}
-        {isRunning && streaming && status && <div className={styles.info}>{status}</div>}
         <div ref={bottomRef} />
       </div>
 
@@ -449,6 +608,17 @@ export const Chat: React.FC = () => {
         <Button size="small" onClick={handleUndo} disabled={!undoAvailable || isRunning}>Undo last AI changes</Button>
         <Button size="small" appearance="subtle" onClick={handleClear} disabled={isRunning || items.length === 0}>New chat</Button>
       </div>
+
+      {isRunning && (
+        <div className={mergeClasses(styles.activity, awaitingApproval && styles.activityAwaiting)} role="status" aria-live="polite">
+          <div className={styles.activityLine}>
+            <span className={styles.pulse} aria-hidden />
+            <span className={styles.activityText} title={status || activity}>{status || activity || 'Working…'}</span>
+            <span className={styles.elapsed}>{formatElapsed(now - startedAt)}</span>
+          </div>
+          {!awaitingApproval && <ProgressBar thickness="medium" shape="rounded" />}
+        </div>
+      )}
 
       <div className={styles.composer}>
         {selection && !selectionDismissed && (
@@ -466,8 +636,23 @@ export const Chat: React.FC = () => {
             />
           </div>
         )}
-        {attachments.length > 0 && (
+        {(attachments.length > 0 || selectedSkills.length > 0) && (
           <div className={styles.chipRow}>
+            {selectedSkills.map(id => {
+              const skill = allSkills.find(s => s.id === id);
+              return (
+                <span key={id} className={styles.chip}>
+                  <span className={styles.chipLabel} title={skill?.description}>🧩 {skill?.name ?? id}</span>
+                  <Button
+                    size="small"
+                    appearance="transparent"
+                    icon={<span aria-hidden>✕</span>}
+                    aria-label={`Remove skill ${skill?.name ?? id}`}
+                    onClick={() => setSelectedSkills(prev => prev.filter(x => x !== id))}
+                  />
+                </span>
+              );
+            })}
             {attachments.map(a => (
               <span key={a.id} className={styles.chip}>
                 <span className={styles.chipLabel} title={a.name}>📎 {a.name}</span>
@@ -484,14 +669,6 @@ export const Chat: React.FC = () => {
         )}
         {attachmentWarning && <div className={styles.warning}>{attachmentWarning}</div>}
         <div className={styles.inputRow}>
-          <Button
-            appearance="subtle"
-            icon={<span aria-hidden>📎</span>}
-            aria-label="Attach files"
-            title="Attach CSV, JSON, text, PDF or images"
-            disabled={isRunning}
-            onClick={() => fileInputRef.current?.click()}
-          />
           <input
             ref={fileInputRef}
             className={styles.hiddenInput}
@@ -515,13 +692,34 @@ export const Chat: React.FC = () => {
                 void handleSend();
               }
             }}
-            placeholder="Ask the agent… (Shift+Enter for a new line)"
+            placeholder="Ask the agent… (/skill to use a skill, Shift+Enter for a new line)"
             resize="vertical"
             disabled={isRunning}
           />
           {isRunning
             ? <Button onClick={handleStop}>Stop</Button>
             : <Button appearance="primary" onClick={() => void handleSend()} disabled={!input.trim()}>Send</Button>}
+        </div>
+        <div className={styles.toolbar}>
+          <Button
+            size="small"
+            appearance="subtle"
+            icon={<span aria-hidden>📎</span>}
+            aria-label="Attach files"
+            title="Attach CSV, JSON, text, PDF or images"
+            disabled={isRunning}
+            onClick={() => fileInputRef.current?.click()}
+          />
+          <SkillsMenu skills={allSkills} selected={selectedSkills} disabled={isRunning} onChange={setSelectedSkills} onManage={onOpenSettings} />
+          <div className={styles.spacer} />
+          <ModelMenu
+            settings={settings}
+            disabled={isRunning}
+            onSelect={favorite => updateSettings(applyFavorite(settings, favorite))}
+            onAddCurrent={addCurrentToFavorites}
+            onManage={onOpenSettings}
+          />
+          <EffortMenu settings={settings} disabled={isRunning} onChange={effort => updateSettings({ ...settings, reasoningEffort: effort })} />
         </div>
       </div>
     </div>

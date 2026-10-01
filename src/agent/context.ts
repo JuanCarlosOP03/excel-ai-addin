@@ -1,5 +1,5 @@
 import type { AppSettings } from '../utils/storage';
-import { createChatCompletion, type ChatMessage, type ContentPart } from './llmClient';
+import { createChatCompletion, withoutReasoningDetails, type ChatMessage, type ContentPart } from './llmClient';
 
 const CHARS_PER_TOKEN = 3.5;
 const BINARY_PART_TOKENS = 1500;
@@ -49,7 +49,7 @@ export const trimOldContent = (messages: ChatMessage[]): ChatMessage[] => {
       return { ...m, content: `${m.content.slice(0, MAX_OLD_TOOL_OUTPUT)}… (truncated old output)` };
     }
     if (i < lastUser && m.role === 'user' && Array.isArray(m.content)) return stripBinaryContent([m])[0];
-    return m;
+    return i < lastUser ? withoutReasoningDetails(m) : m;
   });
 };
 

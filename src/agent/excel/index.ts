@@ -40,7 +40,10 @@ export { previewToolCall, selectReference, type GridPreview } from './preview';
 export { beginUndoGroup, canUndo, cleanupOrphanBackups, endUndoGroup, initUndo, undoLastGroup, type UndoStep } from './undo';
 export { getSelectedRangeAddress, getWorkbookOverview, type WorkbookOverview } from './workbookTools';
 
-const EXECUTORS: Record<ToolName, Executor> = {
+// use_skill is handled by the agent loop: it doesn't touch the workbook.
+export type ExcelToolName = Exclude<ToolName, 'use_skill'>;
+
+const EXECUTORS: Record<ExcelToolName, Executor> = {
   get_workbook_context: getWorkbookContext,
   read_range: readRange,
   search_workbook: searchWorkbook,
@@ -83,5 +86,5 @@ const EXECUTORS: Record<ToolName, Executor> = {
 };
 
 /** Runs one tool in its own Excel batch. Throws ToolError or Office errors on failure. */
-export const executeTool = (name: ToolName, args: Args, options: ToolOptions = {}): Promise<unknown> =>
+export const executeTool = (name: ExcelToolName, args: Args, options: ToolOptions = {}): Promise<unknown> =>
   Excel.run(context => EXECUTORS[name](context, args, options));

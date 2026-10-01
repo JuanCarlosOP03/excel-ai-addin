@@ -14,7 +14,8 @@ export type ContentPart =
 export type ChatMessage =
   | { role: 'system'; content: string | ContentPart[] }
   | { role: 'user'; content: string | ContentPart[] }
-  | { role: 'assistant'; content: string | null; tool_calls?: ToolCall[] }
+  /** reasoning_details (OpenRouter) must be sent back unchanged while a tool-calling turn continues. */
+  | { role: 'assistant'; content: string | null; tool_calls?: ToolCall[]; reasoning_details?: ReasoningDetail[] }
   | { role: 'tool'; tool_call_id: string; content: string };
 
 export interface ToolDefinition {
@@ -22,9 +23,14 @@ export interface ToolDefinition {
   function: { name: string; description: string; parameters: Record<string, unknown> };
 }
 
+export type ReasoningDetail = Record<string, unknown> & { type?: string; index?: number };
+
 export interface ChatCompletionResult {
   content: string | null;
   toolCalls: ToolCall[];
+  /** Readable reasoning text, when the model exposes it. */
+  reasoning?: string;
+  reasoningDetails?: ReasoningDetail[];
   /** `length` means the model hit its output limit and the response is truncated. */
   finishReason: string | null;
   promptTokens?: number;
@@ -34,6 +40,8 @@ export interface CompletionOptions {
   signal?: AbortSignal;
   /** Receives text as it is generated (streaming only). */
   onTextDelta?: (delta: string) => void;
+  /** Receives reasoning ("thinking") text as it is generated. */
+  onReasoningDelta?: (delta: string) => void;
   /** Called before waiting to retry a failed request. */
   onRetry?: (info: { attempt: number; delaySeconds: number; reason: string }) => void;
   stream?: boolean;
@@ -145,15 +153,41 @@ const parseJson = (text: string): unknown => {
   }
 };
 
+interface ReasoningFields {
+  /** OpenRouter. */
+  reasoning?: string | null;
+  /** DeepSeek, LM Studio and others. */
+  reasoning_content?: string | null;
+  reasoning_details?: ReasoningDetail[];
+}
+
 interface CompletionChunk {
   error?: { message?: string } | string;
   choices?: {
-    message?: { content?: string | null; tool_calls?: Partial<ToolCall>[] };
-    delta?: { content?: string | null; tool_calls?: (Partial<ToolCall> & { index?: number; function?: { name?: string; arguments?: string } })[] };
+    message?: { content?: string | null; tool_calls?: Partial<ToolCall>[] } & ReasoningFields;
+    delta?: { content?: string | null; tool_calls?: (Partial<ToolCall> & { index?: number; function?: { name?: string; arguments?: string } })[] } & ReasoningFields;
     finish_reason?: string | null;
   }[];
   usage?: { prompt_tokens?: number };
 }
+
+const reasoningText = (fields?: ReasoningFields) => fields?.reasoning || fields?.reasoning_content || '';
+
+/** Streamed reasoning_details arrive in pieces; pieces with the same index are concatenated. */
+const mergeReasoningDetails = (target: ReasoningDetail[], pieces: ReasoningDetail[]) => {
+  for (const piece of pieces) {
+    const index = typeof piece.index === 'number' ? piece.index : target.length ? target.length - 1 : 0;
+    const existing = target.find(d => (d.index ?? 0) === index && d.type === piece.type);
+    if (!existing) {
+      target.push({ ...piece, index });
+      continue;
+    }
+    for (const [key, value] of Object.entries(piece)) {
+      if (['text', 'summary', 'data'].includes(key) && typeof value === 'string') existing[key] = `${existing[key] ?? ''}${value}`;
+      else if (value !== null && value !== undefined) existing[key] = value;
+    }
+  }
+};
 
 const throwChunkError = (chunk: CompletionChunk) => {
   if (!chunk.error) return;
@@ -171,12 +205,15 @@ const normalizeToolCalls = (calls: Partial<ToolCall>[]): ToolCall[] =>
 /** Reads an OpenAI-style server-sent event stream, accumulating text and tool call fragments. */
 export const readCompletionStream = async (
   body: ReadableStream<Uint8Array>,
-  onTextDelta?: (delta: string) => void
+  onTextDelta?: (delta: string) => void,
+  onReasoningDelta?: (delta: string) => void
 ): Promise<ChatCompletionResult> => {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
   let content = '';
+  let reasoning = '';
+  const reasoningDetails: ReasoningDetail[] = [];
   let finishReason: string | null = null;
   let promptTokens: number | undefined;
   const calls: { id?: string; name: string; arguments: string }[] = [];
@@ -200,6 +237,12 @@ export const readCompletionStream = async (
     if (!choice) return;
     if (choice.finish_reason) finishReason = choice.finish_reason;
     const delta = choice.delta ?? choice.message;
+    const thinking = reasoningText(delta);
+    if (thinking) {
+      reasoning += thinking;
+      onReasoningDelta?.(thinking);
+    }
+    if (delta?.reasoning_details?.length) mergeReasoningDetails(reasoningDetails, delta.reasoning_details);
     if (delta?.content) {
       content += delta.content;
       onTextDelta?.(delta.content);
@@ -229,7 +272,25 @@ export const readCompletionStream = async (
     toolCalls: normalizeToolCalls(calls.filter(Boolean).map(c => ({ id: c.id, function: { name: c.name, arguments: c.arguments } }))),
     finishReason,
     promptTokens,
+    ...(reasoning ? { reasoning } : {}),
+    ...(reasoningDetails.length ? { reasoningDetails } : {}),
   };
+};
+
+export const withoutReasoningDetails = (message: ChatMessage): ChatMessage => {
+  if (message.role !== 'assistant' || !message.reasoning_details) return message;
+  const copy = { ...message };
+  delete copy.reasoning_details;
+  return copy;
+};
+
+/** Provider-specific request fields for the chosen reasoning effort. */
+const reasoningParams = (settings: AppSettings): Record<string, unknown> => {
+  const effort = settings.reasoningEffort;
+  if (effort === 'default') return {};
+  if (activeConfig(settings).modelInfo?.supportsReasoning === false) return {};
+  // OpenRouter has a unified `reasoning` object; other OpenAI-compatible APIs use `reasoning_effort`.
+  return settings.provider === 'openrouter' ? { reasoning: { effort } } : { reasoning_effort: effort };
 };
 
 const usesPromptCaching = (settings: AppSettings) =>
@@ -263,15 +324,22 @@ export const createChatCompletion = async (
   const model = activeConfig(settings).model.trim();
   if (!model) throw new Error('Select a model in Settings.');
   const stream = options.stream ?? false;
+  const reasoning = reasoningParams(settings);
+  // reasoning_details are only understood by OpenRouter; other providers may reject unknown fields.
+  const outgoing = settings.provider === 'openrouter'
+    ? messages
+    : messages.map(withoutReasoningDetails);
 
   const res = await fetchWithRetry(settings, buildUrl(settings, '/chat/completions'), {
     method: 'POST',
     headers: buildHeaders(settings),
     body: JSON.stringify({
       model,
-      messages: applyPromptCaching(settings, messages),
+      messages: applyPromptCaching(settings, outgoing),
       ...(tools.length ? { tools, tool_choice: 'auto' } : {}),
-      temperature: 0.2,
+      // Models that think with a reasoning budget (e.g. Claude) don't accept a custom temperature.
+      ...(Object.keys(reasoning).length && settings.reasoningEffort !== 'none' ? {} : { temperature: 0.2 }),
+      ...reasoning,
       ...(stream ? { stream: true } : {}),
     }),
     signal: options.signal,
@@ -279,19 +347,23 @@ export const createChatCompletion = async (
 
   // Some providers ignore `stream` and answer with plain JSON.
   if (stream && res.body && (res.headers.get('content-type') ?? '').includes('text/event-stream')) {
-    return readCompletionStream(res.body, options.onTextDelta);
+    return readCompletionStream(res.body, options.onTextDelta, options.onReasoningDelta);
   }
 
   const data = parseJson(await res.text()) as CompletionChunk;
   throwChunkError(data);
   const choice = data.choices?.[0];
   if (!choice?.message) throw new Error(`The provider returned no message: ${JSON.stringify(data).slice(0, 300)}`);
+  const thinking = reasoningText(choice.message);
+  if (thinking) options.onReasoningDelta?.(thinking);
   if (choice.message.content) options.onTextDelta?.(choice.message.content);
   return {
     content: choice.message.content ?? null,
     toolCalls: normalizeToolCalls(choice.message.tool_calls ?? []),
     finishReason: choice.finish_reason ?? null,
     promptTokens: data.usage?.prompt_tokens,
+    ...(thinking ? { reasoning: thinking } : {}),
+    ...(choice.message.reasoning_details?.length ? { reasoningDetails: choice.message.reasoning_details } : {}),
   };
 };
 
@@ -313,7 +385,10 @@ export const listModels = async (settings: AppSettings): Promise<ModelInfo[]> =>
     .map(m => ({
       id: m.id!.replace(/^models\//, ''),
       // OpenRouter reports capabilities; other providers leave them unknown.
-      ...(m.supported_parameters ? { supportsTools: m.supported_parameters.includes('tools') } : {}),
+      ...(m.supported_parameters ? {
+        supportsTools: m.supported_parameters.includes('tools'),
+        supportsReasoning: m.supported_parameters.includes('reasoning') || m.supported_parameters.includes('include_reasoning'),
+      } : {}),
       ...(m.architecture?.input_modalities ? {
         supportsImages: m.architecture.input_modalities.includes('image'),
         supportsFiles: m.architecture.input_modalities.includes('file'),

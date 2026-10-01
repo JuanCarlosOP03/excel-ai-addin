@@ -3,6 +3,7 @@ import { CHART_TYPES } from './excel/analysisTools';
 import { isApiSupported } from './excel/common';
 
 export type ToolName =
+  | 'use_skill'
   | 'get_workbook_context' | 'read_range' | 'search_workbook' | 'profile_data'
   | 'trace_formula' | 'find_formula_errors' | 'read_attachment'
   | 'activate_worksheet' | 'create_worksheet' | 'rename_worksheet' | 'delete_worksheet' | 'set_worksheet_visibility'
@@ -68,6 +69,12 @@ const WRITE: ToolMeta = { mutating: true };
 const IRREVERSIBLE: ToolMeta = { mutating: true, irreversible: true };
 
 export const TOOL_DEFINITIONS: ToolDefinition[] = [
+  // --- Skills ------------------------------------------------------------------
+  tool('use_skill', READ,
+    'Load the expert instructions of a skill (listed in the system prompt) before building something it covers. Load each skill once per conversation.',
+    { skill_id: { type: 'string', description: 'Id from the skill list.' } },
+    ['skill_id']),
+
   // --- Inspect and analyze ---------------------------------------------------
   tool('get_workbook_context', READ,
     'Inspect the workbook: all worksheets (used ranges, first row, charts, PivotTables), the active sheet with sample rows, the selection, Excel tables with headers, and named ranges.'),
@@ -257,8 +264,16 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     },
     ['sheet_name', 'range_address', 'type']),
   tool('set_rows_columns', WRITE,
-    'Set column widths / row heights (in points), auto-fit them, or hide/unhide whole rows ("5:7") or columns ("C:D").',
-    { sheet_name: SHEET_NAME, range_address: RANGE('C:D, 5:7 or A1:F1'), hidden: BOOL(), column_width: { type: 'number' }, row_height: { type: 'number' }, autofit_columns: BOOL(), autofit_rows: BOOL() },
+    'Set column widths / row heights (in points), auto-fit them, or hide/unhide whole rows ("5:7") or columns ("C:D"). For automatic sizing use autofit_rows/autofit_columns and omit the sizes; never pass 0 (it would hide them).',
+    {
+      sheet_name: SHEET_NAME,
+      range_address: RANGE('C:D, 5:7 or A1:F1'),
+      hidden: BOOL('Hide (true) or unhide (false).'),
+      column_width: { type: 'number', description: 'Points, > 0 (default column ≈ 48, wide text column ≈ 150).' },
+      row_height: { type: 'number', description: 'Points, 1–409 (default row ≈ 15).' },
+      autofit_columns: BOOL(),
+      autofit_rows: BOOL(),
+    },
     ['sheet_name', 'range_address']),
   tool('freeze_panes', WRITE, 'Freeze the top rows and/or left columns of a sheet (0 and 0 unfreezes).',
     { sheet_name: SHEET_NAME, rows: { type: 'number' }, columns: { type: 'number' } },
@@ -364,6 +379,7 @@ const list = (value: unknown) =>
 /** Short human-readable description shown in the chat and approval cards. */
 export const describeToolCall = (name: string, args: Record<string, unknown>): string => {
   switch (name) {
+    case 'use_skill': return `Use skill "${args.skill_id}"`;
     case 'get_workbook_context': return 'Inspect workbook structure';
     case 'read_range': return `Read ${at(args, 'range_address')}`;
     case 'search_workbook': return `Search for "${args.query}"${args.sheet_name ? ` in ${args.sheet_name}` : ''}`;

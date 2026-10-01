@@ -3,6 +3,9 @@ import { Button, Checkbox, Field, Input, Select, Textarea, makeStyles, tokens } 
 import {
   CONTEXT_TOKEN_LIMITS,
   MAX_CUSTOM_INSTRUCTIONS,
+  MAX_CUSTOM_SKILLS,
+  MAX_FAVORITES,
+  MAX_SKILL_INSTRUCTIONS,
   PROVIDERS,
   PROVIDER_IDS,
   READ_CELLS_LIMITS,
@@ -10,12 +13,16 @@ import {
   clampReadCells,
   loadSettings,
   saveSettings,
+  activeModelLabel,
   type AppSettings,
+  type CustomSkill,
+  type FavoriteModel,
   type ModelInfo,
   type ProviderConfig,
   type ProviderId,
 } from '../utils/storage';
 import { listModels } from '../agent/llmClient';
+import { BUILT_IN_SKILLS, getSkills, skillIdFromName } from '../agent/skills';
 
 const useStyles = makeStyles({
   container: {
@@ -49,6 +56,14 @@ const useStyles = makeStyles({
     fontSize: tokens.fontSizeBase200,
     color: tokens.colorNeutralForeground2,
   },
+  listItem: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px',
+    padding: '8px',
+    border: `1px solid ${tokens.colorNeutralStroke2}`,
+    borderRadius: tokens.borderRadiusMedium,
+  },
   warning: {
     fontSize: tokens.fontSizeBase200,
     color: tokens.colorPaletteRedForeground1,
@@ -56,19 +71,12 @@ const useStyles = makeStyles({
   },
 });
 
-/** Starting points for the custom instructions, appended to what the user already wrote. */
-const TEMPLATES: Record<string, string> = {
-  'Spanish answers': 'Respond in Spanish. Use the decimal and date conventions of Latin America when explaining values, but keep formulas in English with comma separators.',
-  'Financial modeling': [
-    'Follow financial modeling conventions: blue font (#0000FF) for hard-coded inputs, black for formulas, green (#008000) for links to other sheets.',
-    'Keep assumptions in a separate, clearly labeled inputs section and reference them instead of hard-coding numbers in formulas.',
-    'Show years as columns and line items as rows. Use number formats like #,##0;(#,##0) for amounts and 0.0% for rates.',
-    'For valuations (DCF): project free cash flow, discount with WACC using XNPV/NPV, compute terminal value with the Gordon growth or exit multiple method, and add a sensitivity table.',
-  ].join('\n'),
-  Accounting: 'Use accounting number format, keep debits and credits balanced, flag differences with conditional formatting, and never overwrite source ledgers: put results in new sheets.',
-  'Data cleaning': 'Before changing data, profile it and report issues (blanks, duplicates, inconsistent text, numbers stored as text). Make cleaned copies in new sheets instead of editing the original data.',
-  'Dashboards': 'When building reports, put summary KPIs at the top, use PivotTables or SUMIFS for aggregates, add clear charts with titles and axis labels, and keep a consistent color palette.',
-};
+interface SkillDraft {
+  id: string | null;
+  name: string;
+  description: string;
+  instructions: string;
+}
 
 interface SettingsProps {
   onBack: () => void;
@@ -117,6 +125,11 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
       setLoadedModels(prev => ({ ...prev, [provider]: models }));
       const current = models.find(m => m.id === config.model);
       if (current) updateConfig({ modelInfo: current });
+      // Refresh the capabilities of this provider's favorites too.
+      setSettings(prev => ({
+        ...prev,
+        favorites: prev.favorites.map(f => (f.provider === provider ? { ...f, modelInfo: models.find(m => m.id === f.model) ?? f.modelInfo } : f)),
+      }));
       if (models.length === 0) setModelError('The provider returned no models.');
     } catch (e) {
       setModelError(e instanceof Error ? e.message : String(e));
@@ -125,14 +138,44 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
     }
   };
 
-  const addTemplate = (name: string) => {
-    const template = TEMPLATES[name];
-    if (!template) return;
+  const currentIsFavorite = settings.favorites.some(f => f.provider === provider && f.model === config.model);
+  const addFavorite = () => {
+    if (!config.model.trim() || currentIsFavorite || settings.favorites.length >= MAX_FAVORITES) return;
     setSettings(prev => ({
       ...prev,
-      customInstructions: (prev.customInstructions.trim() ? `${prev.customInstructions.trim()}\n\n${template}` : template).slice(0, MAX_CUSTOM_INSTRUCTIONS),
+      favorites: [...prev.favorites, { provider, model: config.model.trim(), label: activeModelLabel(prev), modelInfo }],
     }));
   };
+  const updateFavorite = (index: number, patch: Partial<FavoriteModel>) =>
+    setSettings(prev => ({ ...prev, favorites: prev.favorites.map((f, i) => (i === index ? { ...f, ...patch } : f)) }));
+  const removeFavorite = (index: number) =>
+    setSettings(prev => ({ ...prev, favorites: prev.favorites.filter((_, i) => i !== index) }));
+  const moveFavorite = (index: number) =>
+    setSettings(prev => {
+      const favorites = [...prev.favorites];
+      [favorites[index - 1], favorites[index]] = [favorites[index], favorites[index - 1]];
+      return { ...prev, favorites };
+    });
+
+  const [skillDraft, setSkillDraft] = useState<SkillDraft | null>(null);
+  const saveSkillDraft = () => {
+    if (!skillDraft || !skillDraft.name.trim() || !skillDraft.instructions.trim()) return;
+    const id = skillDraft.id ?? skillIdFromName(skillDraft.name);
+    const skill: CustomSkill = {
+      id,
+      name: skillDraft.name.trim(),
+      description: skillDraft.description.trim(),
+      instructions: skillDraft.instructions.slice(0, MAX_SKILL_INSTRUCTIONS),
+    };
+    setSettings(prev => {
+      const exists = prev.customSkills.some(s => s.id === id);
+      return { ...prev, customSkills: exists ? prev.customSkills.map(s => (s.id === id ? skill : s)) : [...prev.customSkills, skill] };
+    });
+    setSkillDraft(null);
+  };
+  const removeSkill = (id: string) => setSettings(prev => ({ ...prev, customSkills: prev.customSkills.filter(s => s.id !== id) }));
+  const editSkill = (skill: { id: string; name: string; description: string; instructions: string }) =>
+    setSkillDraft({ id: skill.id, name: skill.name, description: skill.description, instructions: skill.instructions });
 
   const handleSave = () => {
     saveSettings({
@@ -221,6 +264,77 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
         />
       )}
 
+      <div className={styles.section}>Favorite models ({settings.favorites.length}/{MAX_FAVORITES})</div>
+      <div className={styles.hint}>Switch between them from the model button in the chat. Each favorite remembers its provider; the provider's API key is the one configured above.</div>
+      {settings.favorites.map((f, i) => (
+        <div key={`${f.provider}::${f.model}`} className={styles.listItem}>
+          <div className={styles.row}>
+            <Input className={styles.grow} size="small" value={f.label} aria-label="Display name" onChange={(_, data) => updateFavorite(i, { label: data.value })} />
+            <Button size="small" appearance="subtle" disabled={i === 0} onClick={() => moveFavorite(i)} aria-label="Move up" title="Move up">↑</Button>
+            <Button size="small" appearance="subtle" onClick={() => removeFavorite(i)} aria-label="Remove" title="Remove">✕</Button>
+          </div>
+          <div className={styles.hint}>{PROVIDERS[f.provider].label} · {f.model}</div>
+        </div>
+      ))}
+      <Button
+        onClick={addFavorite}
+        disabled={!config.model.trim() || currentIsFavorite || settings.favorites.length >= MAX_FAVORITES}
+      >
+        {currentIsFavorite ? '★ The current model is a favorite' : `☆ Add ${info.label} · ${config.model || 'model'} to favorites`}
+      </Button>
+
+      <div className={styles.section}>Skills</div>
+      <div className={styles.hint}>
+        Expert playbooks the agent loads when a request needs them, or that you attach from the Skills button or with /skill-id at the start of a message.
+        Built-in skills can be customized: your version replaces the original.
+      </div>
+      {getSkills(settings).map(skill => (
+        <div key={skill.id} className={styles.listItem}>
+          <div className={styles.row}>
+            <div className={styles.grow}>
+              <b>{skill.name}</b> <span className={styles.hint}>/{skill.id}{skill.builtIn ? '' : BUILT_IN_SKILLS.some(b => b.id === skill.id) ? ' · customized' : ' · custom'}</span>
+            </div>
+            <Button size="small" appearance="subtle" onClick={() => editSkill(skill)}>{skill.builtIn ? 'Customize' : 'Edit'}</Button>
+            {!skill.builtIn && (
+              <Button size="small" appearance="subtle" onClick={() => removeSkill(skill.id)} title={BUILT_IN_SKILLS.some(b => b.id === skill.id) ? 'Restore the built-in version' : 'Delete'}>
+                {BUILT_IN_SKILLS.some(b => b.id === skill.id) ? 'Reset' : '✕'}
+              </Button>
+            )}
+          </div>
+          <div className={styles.hint}>{skill.description}</div>
+        </div>
+      ))}
+      {skillDraft ? (
+        <div className={styles.listItem}>
+          <Field label="Name" required>
+            <Input value={skillDraft.name} placeholder="e.g. Monthly sales report" onChange={(_, data) => setSkillDraft({ ...skillDraft, name: data.value })} />
+          </Field>
+          <Field label="When to use it" hint="Shown to the agent so it knows when to load the skill.">
+            <Input value={skillDraft.description} placeholder="e.g. Building the monthly sales report for management." onChange={(_, data) => setSkillDraft({ ...skillDraft, description: data.value })} />
+          </Field>
+          <Field label="Instructions" required hint={`Steps, conventions, layout, formats… (max ${MAX_SKILL_INSTRUCTIONS} characters)`}>
+            <Textarea
+              value={skillDraft.instructions}
+              maxLength={MAX_SKILL_INSTRUCTIONS}
+              rows={8}
+              resize="vertical"
+              onChange={(_, data) => setSkillDraft({ ...skillDraft, instructions: data.value })}
+            />
+          </Field>
+          <div className={styles.row}>
+            <Button appearance="primary" size="small" onClick={saveSkillDraft} disabled={!skillDraft.name.trim() || !skillDraft.instructions.trim()}>Save skill</Button>
+            <Button size="small" onClick={() => setSkillDraft(null)}>Cancel</Button>
+          </div>
+        </div>
+      ) : (
+        <Button
+          onClick={() => setSkillDraft({ id: null, name: '', description: '', instructions: '' })}
+          disabled={settings.customSkills.length >= MAX_CUSTOM_SKILLS}
+        >
+          + New skill
+        </Button>
+      )}
+
       <div className={styles.section}>Agent</div>
 
       <Field label="Custom instructions" hint="Added to every request: language, conventions, domain rules.">
@@ -232,12 +346,6 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
           placeholder="e.g. Respond in Spanish. Amounts are in MXN. Our fiscal year starts in April."
           onChange={(_, data) => setSettings(prev => ({ ...prev, customInstructions: data.value }))}
         />
-      </Field>
-      <Field label="Add a template">
-        <Select value="" onChange={(_, data) => addTemplate(data.value)}>
-          <option value="">Choose a template…</option>
-          {Object.keys(TEMPLATES).map(name => <option key={name} value={name}>{name}</option>)}
-        </Select>
       </Field>
 
       <Checkbox

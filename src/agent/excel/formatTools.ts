@@ -10,6 +10,7 @@ import {
   type Args,
 } from './common';
 import { recordUndo, snapshotRange } from './undo';
+import { repairCollapsed } from './structureTools';
 
 const MAX_NUMBER_FORMAT_CELLS = 200000;
 
@@ -37,7 +38,7 @@ export const formatRange = async (context: Excel.RequestContext, args: Args) => 
   const applied = Object.entries(options).filter(([, value]) => value !== undefined).map(([key]) => key);
   if (applied.length === 0) throw new ToolError('Provide at least one formatting property.');
 
-  const { sheetName, range } = await resolveRange(context, args, 'range_address');
+  const { sheet, sheetName, range } = await resolveRange(context, args, 'range_address');
   if (options.numberFormat && range.cellCount > MAX_NUMBER_FORMAT_CELLS) {
     throw new ToolError(`"num_format" can be applied to at most ${MAX_NUMBER_FORMAT_CELLS} cells at once, but the range has ${range.cellCount}. Limit it to the rows that contain data.`);
   }
@@ -72,13 +73,21 @@ export const formatRange = async (context: Excel.RequestContext, args: Args) => 
   }
   if (options.autofit) format.autofitColumns();
   await context.sync();
+  // Auto-fit, wrapping and font size change sizes: make sure no row or column collapsed to 0.
+  const repaired = options.autofit || options.wrapText !== undefined || options.fontSize
+    ? await repairCollapsed(context, sheet, range, { rows: options.wrapText !== undefined || !!options.fontSize, columns: !!options.autofit })
+    : 0;
 
+  const notes = [
+    snapshot ? '' : 'The range was too large to snapshot, so this change cannot be undone.',
+    repaired ? `${repaired} rows/columns had collapsed to zero size and were restored to the default size.` : '',
+  ].filter(Boolean);
   return {
     sheet: sheetName,
     address: localAddress(range.address),
     applied,
     undoAvailable: snapshot !== null,
-    ...(snapshot ? {} : { note: 'The range was too large to snapshot, so this change cannot be undone.' }),
+    ...(notes.length ? { note: notes.join(' ') } : {}),
   };
 };
 

@@ -20,6 +20,8 @@
   - **Formatting & layout:** `format_range`, `add_conditional_format`, `set_rows_columns` (widths, heights, hide/unhide), `freeze_panes`, `merge_cells`, `add_comment`
   - **Charts & PivotTables:** `create_chart`, `update_chart`, `delete_chart`, `create_pivot_table`, `update_pivot_table`, `delete_pivot_table`
   - Tools that need a newer Excel than the one running are hidden from the model automatically.
+- 🧩 **Skills**: expert playbooks for financial models, dashboards, data cleaning, professional formatting, advanced formulas, data analysis, charts, budgets & forecasts and trackers. The agent loads them when a request needs them (`use_skill`), or you attach them from the Skills button or with `/skill-id` at the start of a message. Built-in skills can be customized and you can write your own in Settings.
+- 🔀 **Favorite models & effort**: save up to 5 favorite models (from any provider) and switch between them from the chat; choose the reasoning effort (Default, Off, Low, Medium, High) — the model's thinking is shown collapsed.
 - 💬 **Chat**: answers stream in as they are generated and are rendered as Markdown; cell references like `Sales!B5` are clickable and select the range. Each request ends with a list of the changes made, linked to the affected ranges.
 - 📎 **Attachments**: CSV, TSV, JSON and text files are parsed in the browser (large files are imported directly into the workbook without passing through the model); images and PDFs are sent to models that accept them. Images can also be pasted.
 - ✅ **Approval & undo**: Changes are shown for approval with a before → after preview of the cells (can be turned off in Settings; irreversible actions such as deleting a chart always ask). All changes from one request can be undone together, including deleted sheets (kept as a hidden backup while they can be undone).
@@ -75,6 +77,7 @@ Code layout:
 
 - `src/agent/tools.ts` – JSON schemas of the tools sent to the model
 - `src/agent/excel/` – Office.js executors (`workbookTools`, `dataTools`, `editTools`, `structureTools`, `formatTools`, `formulaTools`, `analysisTools`, `insightTools`), approval previews (`preview.ts`) and the undo journal (`undo.ts`)
+- `src/agent/skills.ts` – built-in skills and skill lookup
 - `src/agent/context.ts` – conversation size control and summarization
 - `src/agent/attachments.ts` – file parsing for attachments
 - `src/agent/llmClient.ts` – OpenAI-compatible chat completions client

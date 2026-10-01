@@ -51,7 +51,7 @@ function App() {
         {view === 'settings' ? (
           <Settings onBack={() => setView('chat')} />
         ) : (
-          <Chat />
+          <Chat onOpenSettings={() => setView('settings')} />
         )}
       </div>
     </div>
