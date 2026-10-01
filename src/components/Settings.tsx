@@ -117,18 +117,21 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
     updateConfig({ model, modelInfo: found ?? keep });
   };
 
-  const loadModels = async () => {
+  const loadModelsFor = async (providerId: ProviderId) => {
     setIsLoadingModels(true);
     setModelError('');
     try {
-      const models = await listModels(settings);
-      setLoadedModels(prev => ({ ...prev, [provider]: models }));
-      const current = models.find(m => m.id === config.model);
-      if (current) updateConfig({ modelInfo: current });
+      const models = await listModels({ ...settings, provider: providerId });
+      setLoadedModels(prev => ({ ...prev, [providerId]: models }));
+      const currentModel = settings.providers[providerId].model;
+      const current = models.find(m => m.id === currentModel);
+      if (current) {
+        setSettings(prev => ({ ...prev, providers: { ...prev.providers, [providerId]: { ...prev.providers[providerId], modelInfo: current } } }));
+      }
       // Refresh the capabilities of this provider's favorites too.
       setSettings(prev => ({
         ...prev,
-        favorites: prev.favorites.map(f => (f.provider === provider ? { ...f, modelInfo: models.find(m => m.id === f.model) ?? f.modelInfo } : f)),
+        favorites: prev.favorites.map(f => (f.provider === providerId ? { ...f, modelInfo: models.find(m => m.id === f.model) ?? f.modelInfo } : f)),
       }));
       if (models.length === 0) setModelError('The provider returned no models.');
     } catch (e) {
@@ -137,15 +140,30 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
       setIsLoadingModels(false);
     }
   };
+  const loadModels = () => loadModelsFor(provider);
 
   const currentIsFavorite = settings.favorites.some(f => f.provider === provider && f.model === config.model);
-  const addFavorite = () => {
-    if (!config.model.trim() || currentIsFavorite || settings.favorites.length >= MAX_FAVORITES) return;
+
+  // Add any model as a favorite directly, independently of the model configured above.
+  const [favoriteDraft, setFavoriteDraft] = useState<{ provider: ProviderId; model: string; label: string }>({ provider, model: '', label: '' });
+  const favoriteDraftInfo = loadedModels[favoriteDraft.provider]?.find(m => m.id === favoriteDraft.model.trim());
+  const favoriteDraftModels = [...new Set([...PROVIDERS[favoriteDraft.provider].suggestedModels, ...(loadedModels[favoriteDraft.provider] ?? []).map(m => m.id)])];
+  const favoriteDraftDuplicate = settings.favorites.some(f => f.provider === favoriteDraft.provider && f.model === favoriteDraft.model.trim());
+
+  const addFavorite = (entry: { provider: ProviderId; model: string; label: string; modelInfo?: ModelInfo }) => {
+    const model = entry.model.trim();
+    if (!model || settings.favorites.length >= MAX_FAVORITES) return;
+    if (settings.favorites.some(f => f.provider === entry.provider && f.model === model)) return;
     setSettings(prev => ({
       ...prev,
-      favorites: [...prev.favorites, { provider, model: config.model.trim(), label: activeModelLabel(prev), modelInfo }],
+      favorites: [...prev.favorites, { provider: entry.provider, model, label: entry.label.trim() || model.split('/').pop() || model, modelInfo: entry.modelInfo }],
     }));
   };
+  const addFavoriteFromDraft = () => {
+    addFavorite({ ...favoriteDraft, modelInfo: favoriteDraftInfo });
+    setFavoriteDraft({ provider: favoriteDraft.provider, model: '', label: '' });
+  };
+  const addCurrentAsFavorite = () => addFavorite({ provider, model: config.model, label: activeModelLabel(settings), modelInfo });
   const updateFavorite = (index: number, patch: Partial<FavoriteModel>) =>
     setSettings(prev => ({ ...prev, favorites: prev.favorites.map((f, i) => (i === index ? { ...f, ...patch } : f)) }));
   const removeFavorite = (index: number) =>
@@ -265,7 +283,7 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
       )}
 
       <div className={styles.section}>Favorite models ({settings.favorites.length}/{MAX_FAVORITES})</div>
-      <div className={styles.hint}>Switch between them from the model button in the chat. Each favorite remembers its provider; the provider's API key is the one configured above.</div>
+      <div className={styles.hint}>Add any model you want, from any provider. Switch between them from the model button in the chat. Each favorite uses that provider's own API key, configured above when you select it there.</div>
       {settings.favorites.map((f, i) => (
         <div key={`${f.provider}::${f.model}`} className={styles.listItem}>
           <div className={styles.row}>
@@ -276,12 +294,54 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
           <div className={styles.hint}>{PROVIDERS[f.provider].label} · {f.model}</div>
         </div>
       ))}
-      <Button
-        onClick={addFavorite}
-        disabled={!config.model.trim() || currentIsFavorite || settings.favorites.length >= MAX_FAVORITES}
-      >
-        {currentIsFavorite ? '★ The current model is a favorite' : `☆ Add ${info.label} · ${config.model || 'model'} to favorites`}
-      </Button>
+
+      {settings.favorites.length < MAX_FAVORITES && (
+        <div className={styles.listItem}>
+          <div className={styles.row}>
+            <Field label="Provider">
+              <Select value={favoriteDraft.provider} onChange={(_, data) => setFavoriteDraft({ provider: data.value as ProviderId, model: '', label: '' })}>
+                {PROVIDER_IDS.map(id => <option key={id} value={id}>{PROVIDERS[id].label}</option>)}
+              </Select>
+            </Field>
+          </div>
+          <div className={styles.row}>
+            <Field className={styles.grow} label="Model" hint={loadedModels[favoriteDraft.provider] ? `${loadedModels[favoriteDraft.provider]!.length} models loaded` : 'Type a model id or load the list.'}>
+              <Input
+                list="favorite-model-options"
+                value={favoriteDraft.model}
+                placeholder={PROVIDERS[favoriteDraft.provider].defaultModel || 'model-id'}
+                onChange={(_, data) => setFavoriteDraft({ ...favoriteDraft, model: data.value })}
+              />
+            </Field>
+            <Button
+              onClick={() => void loadModelsFor(favoriteDraft.provider)}
+              disabled={isLoadingModels || (PROVIDERS[favoriteDraft.provider].requiresKey && !settings.providers[favoriteDraft.provider].apiKey)}
+            >
+              {isLoadingModels ? 'Loading…' : 'Load models'}
+            </Button>
+          </div>
+          <datalist id="favorite-model-options">
+            {favoriteDraftModels.map(m => <option key={m} value={m} />)}
+          </datalist>
+          {PROVIDERS[favoriteDraft.provider].requiresKey && !settings.providers[favoriteDraft.provider].apiKey && (
+            <div className={styles.hint}>
+              You can type a model id and add it directly. To use "Load models", first switch "AI provider" above to {PROVIDERS[favoriteDraft.provider].label} and set its API key.
+            </div>
+          )}
+          {favoriteDraftDuplicate && <div className={styles.hint}>Already a favorite.</div>}
+          <div className={styles.row}>
+            <Field className={styles.grow} label="Display name (optional)">
+              <Input value={favoriteDraft.label} placeholder={favoriteDraft.model.split('/').pop() || 'name'} onChange={(_, data) => setFavoriteDraft({ ...favoriteDraft, label: data.value })} />
+            </Field>
+            <Button appearance="primary" onClick={addFavoriteFromDraft} disabled={!favoriteDraft.model.trim() || favoriteDraftDuplicate}>
+              + Add to favorites
+            </Button>
+          </div>
+        </div>
+      )}
+      {!currentIsFavorite && config.model.trim() && settings.favorites.length < MAX_FAVORITES && (
+        <Button appearance="subtle" onClick={addCurrentAsFavorite}>☆ Also add the model configured above ({info.label} · {config.model})</Button>
+      )}
 
       <div className={styles.section}>Skills</div>
       <div className={styles.hint}>
