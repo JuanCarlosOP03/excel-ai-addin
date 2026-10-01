@@ -85,3 +85,32 @@ export const debounce = <T>(save: (value: T) => void, delay = 500) => {
     timer = setTimeout(() => save(latest), delay);
   };
 };
+
+// ---------------------------------------------------------------------------
+// Chat sessions: the active chat lives at chat:<workbook>; archived chats are
+// listed in chats:<workbook> and stored at chat:<workbook>:<sessionId>.
+// ---------------------------------------------------------------------------
+
+export interface ChatSession {
+  id: string;
+  title: string;
+  updatedAt: number;
+}
+
+const MAX_ARCHIVED_SESSIONS = 30;
+
+export const listChatSessions = (workbookId: string): Promise<ChatSession[]> =>
+  kvGet<ChatSession[]>(`chats:${workbookId}`).then(list => list ?? []);
+
+export const loadArchivedChat = <T>(workbookId: string, sessionId: string): Promise<T | undefined> =>
+  kvGet<T>(`chat:${workbookId}:${sessionId}`);
+
+export const archiveChat = async (workbookId: string, chat: unknown, title: string): Promise<ChatSession[]> => {
+  const sessionId = `${Date.now()}`;
+  await kvSet(`chat:${workbookId}:${sessionId}`, chat);
+  const index = (await listChatSessions(workbookId)).slice(0, MAX_ARCHIVED_SESSIONS - 1);
+  const sessions = [{ id: sessionId, title: title.slice(0, 80) || 'Chat', updatedAt: Date.now() }, ...index];
+  await kvSet(`chats:${workbookId}`, sessions);
+  return sessions;
+};
+

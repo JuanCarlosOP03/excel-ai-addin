@@ -262,6 +262,9 @@ export const activeModelLabel = (settings: AppSettings): string => {
   return favorite?.label || model.split('/').pop() || model || 'No model';
 };
 
+/** Parses an exported settings file; throws when it isn't valid JSON. */
+export const parseImportedSettings = (text: string): AppSettings => mergeSettings(JSON.parse(text));
+
 export const saveSettings = (settings: AppSettings) => {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));

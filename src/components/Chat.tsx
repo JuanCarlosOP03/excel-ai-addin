@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { Button, ProgressBar, Textarea, makeStyles, mergeClasses, tokens } from '@fluentui/react-components';
 import { MAX_FAVORITES, applyFavorite, loadSettings, saveSettings, activeModelLabel, type AppSettings } from '../utils/storage';
-import { debounce, getWorkbookId, kvDelete, kvGet, kvSet } from '../utils/persistence';
+import { archiveChat, debounce, getWorkbookId, kvDelete, kvGet, kvSet, listChatSessions, loadArchivedChat, type ChatSession } from '../utils/persistence';
 import { runAgentLoop, type AgentEvent, type ApprovalDecision, type ApprovalRequest } from '../agent/agentLoop';
 import {
   canUndo,
@@ -257,7 +257,15 @@ interface ChatProps {
   onOpenSettings: () => void;
 }
 
-export const Chat: React.FC<ChatProps> = ({ onOpenSettings }) => {
+/** Header controls (history, new chat, transcript) that live above the chat. */
+export interface ChatHandle {
+  newChat: () => void;
+  downloadTranscript: () => void;
+  listHistory: () => Promise<ChatSession[]>;
+  openChat: (sessionId: string) => void;
+}
+
+export const Chat = forwardRef<ChatHandle, ChatProps>(({ onOpenSettings }, ref) => {
   const styles = useStyles();
   const [settings, setSettings] = useState<AppSettings>(loadSettings);
   const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
@@ -531,11 +539,82 @@ export const Chat: React.FC<ChatProps> = ({ onOpenSettings }) => {
     }
   };
 
-  const handleClear = () => {
+  /** Saves the current chat into the session archive and starts an empty one. */
+  const newChat = async () => {
+    if (isRunning) return;
+    const workbookId = storageKeyRef.current;
+    if (workbookId && items.some(i => i.kind !== 'info')) {
+      const firstUser = items.find(i => i.kind === 'user')?.text ?? 'Chat';
+      try {
+        await archiveChat(workbookId, { items: settleItems(items), history: stripBinaryContent(historyRef.current) }, firstUser);
+      } catch (e) {
+        console.error('Failed to archive the chat', e);
+      }
+    }
     historyRef.current = [];
     setItems([]);
-    if (storageKeyRef.current) void kvDelete(`chat:${storageKeyRef.current}`);
+    setSelectedSkills([]);
+    if (workbookId) void kvDelete(`chat:${workbookId}`);
   };
+
+  /** Replaces the current chat with an archived one (the current chat is archived first). */
+  const openChat = async (sessionId: string) => {
+    if (isRunning) return;
+    const workbookId = storageKeyRef.current;
+    if (!workbookId) return;
+    const archived = await loadArchivedChat<StoredChat>(workbookId, sessionId);
+    if (!archived) return;
+    if (items.some(i => i.kind !== 'info')) await archiveChat(workbookId, { items: settleItems(items), history: stripBinaryContent(historyRef.current) }, items.find(i => i.kind === 'user')?.text ?? 'Chat');
+    historyRef.current = archived.history ?? [];
+    setItems(settleItems(archived.items ?? []));
+    void kvSet(`chat:${workbookId}`, archived);
+    setUndoAvailable(canUndo());
+  };
+
+  const downloadTranscript = () => {
+    const lines: string[] = ['# Excel AI chat', ''];
+    for (const item of items) {
+      switch (item.kind) {
+        case 'user':
+          lines.push(`## You — ${new Date().toLocaleString()}`, '', item.text);
+          if (item.skills?.length) lines.push(`*Skills: ${item.skills.join(', ')}*`);
+          if (item.attachments?.length) lines.push(`*Attachments: ${item.attachments.join(', ')}*`);
+          lines.push('');
+          break;
+        case 'assistant':
+          lines.push(`**Assistant:**`, '', item.text, '');
+          break;
+        case 'thinking':
+          break;
+        case 'tool':
+          lines.push(`- ${item.status === 'error' || item.status === 'rejected' ? '⚠' : '✓'} ${item.summary}${item.detail ? ` — ${item.detail}` : ''}`);
+          break;
+        case 'changes':
+          lines.push('', '**Changes made:**', ...item.entries.map(e => `- ${e.summary}`), '');
+          break;
+        case 'error':
+          lines.push(`> **Error:** ${item.text}`, '');
+          break;
+        case 'info':
+          lines.push(`*${item.text}*`, '');
+          break;
+      }
+    }
+    const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `excel-ai-chat-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')}.md`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  useImperativeHandle(ref, () => ({
+    newChat: () => void newChat(),
+    downloadTranscript,
+    listHistory: () => (storageKeyRef.current ? listChatSessions(storageKeyRef.current) : Promise.resolve([])),
+    openChat: id => void openChat(id),
+  }));
 
   const handlePaste = (e: React.ClipboardEvent) => {
     const images = [...e.clipboardData.files].filter(f => f.type.startsWith('image/'));
@@ -607,7 +686,6 @@ export const Chat: React.FC<ChatProps> = ({ onOpenSettings }) => {
 
       <div className={styles.actions}>
         <Button size="small" onClick={handleUndo} disabled={!undoAvailable || isRunning}>Undo last AI changes</Button>
-        <Button size="small" appearance="subtle" onClick={handleClear} disabled={isRunning || items.length === 0}>New chat</Button>
       </div>
 
       {isRunning && (
@@ -726,4 +804,6 @@ export const Chat: React.FC<ChatProps> = ({ onOpenSettings }) => {
       </div>
     </div>
   );
-};
+});
+
+Chat.displayName = 'Chat';
