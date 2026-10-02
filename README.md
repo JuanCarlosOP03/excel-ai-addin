@@ -27,7 +27,8 @@
 - ✅ **Approval & undo**: Changes are shown for approval with a before → after preview of the cells (can be turned off in Settings; irreversible actions such as deleting a chart always ask). All changes from one request can be undone together, including deleted sheets (kept as a hidden backup while they can be undone).
 - 💾 **Per-workbook history**: the conversation and the undo history are saved in the browser per workbook and restored when the add-in is reopened.
 - 🧩 **Robust agent**: long conversations are summarized automatically, failed requests (rate limits, server errors) are retried, models without tool support are flagged, and custom instructions with templates are added to every request.
-- 💰 **Prompt caching**: the system prompt and the tool catalog are static, and the changing workbook context travels in the last user message, so everything before it can be reused. For Anthropic models on OpenRouter the cache breakpoints are placed on the system prompt and the two most recent user messages (< 4 per request, the maximum allowed); other providers cache stable prefixes on their own. After each answer the chat shows the tokens used and how many came from the cache, which is billed at a fraction of the input price.
+- 💰 **Prompt caching**: the system prompt and the tool catalog are static, and the changing workbook context travels in the last user message, so everything before it can be reused. Explicit cache breakpoints are placed on OpenRouter models that need them (Anthropic, Qwen, Gemini, OpenAI's explicit mode, translated per model); OpenAI, Grok, DeepSeek, Groq and Moonshot cache stable prefixes automatically, and providers outside OpenRouter are left untouched. After each answer the chat shows the tokens used and how many came from the cache, which is billed at a fraction of the input price.
+- 👥 **Sub-agents**: for wide inspections (several sheets or dimensions at once) the agent can split the work with `spawn_agents`: up to 6 read-only sub-agents run their own conversations in parallel (3 at a time), each restricted to the 8 inspection tools, and report back so the agent can analyze and act on their findings.
 - 🧠 **Bring Your Own AI**: Any OpenAI-compatible API with tool calling:
   - **OpenRouter** (default, model `deepseek/deepseek-chat`; also e.g. `anthropic/claude-3.5-sonnet`, `meta-llama/llama-3.3-70b-instruct`)
   - **Google Gemini**, **OpenCode Zen**, **LM Studio** (local models), or any **custom** endpoint (Groq, Together AI…)
@@ -79,6 +80,7 @@ Code layout:
 - `src/agent/tools.ts` – JSON schemas of the tools sent to the model
 - `src/agent/excel/` – Office.js executors (`workbookTools`, `dataTools`, `editTools`, `structureTools`, `formatTools`, `formulaTools`, `analysisTools`, `insightTools`), approval previews (`preview.ts`) and the undo journal (`undo.ts`)
 - `src/agent/skills.ts` – built-in skills and skill lookup
+- `src/agent/subagents.ts` – read-only sub-agent team (`spawn_agents`)
 - `src/agent/context.ts` – conversation size control and summarization
 - `src/agent/attachments.ts` – file parsing for attachments
 - `src/agent/llmClient.ts` – OpenAI-compatible chat completions client

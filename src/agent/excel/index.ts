@@ -40,8 +40,8 @@ export { previewToolCall, selectReference, type GridPreview } from './preview';
 export { beginUndoGroup, canUndo, cleanupOrphanBackups, endUndoGroup, initUndo, undoLastGroup, type UndoStep } from './undo';
 export { getSelectedRangeAddress, getWorkbookOverview, type WorkbookOverview } from './workbookTools';
 
-// use_skill is handled by the agent loop: it doesn't touch the workbook.
-export type ExcelToolName = Exclude<ToolName, 'use_skill'>;
+// use_skill and spawn_agents are handled by the agent loop: they don't touch the workbook.
+export type ExcelToolName = Exclude<ToolName, 'use_skill' | 'spawn_agents'>;
 
 const EXECUTORS: Record<ExcelToolName, Executor> = {
   get_workbook_context: getWorkbookContext,

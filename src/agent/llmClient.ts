@@ -326,8 +326,18 @@ const reasoningParams = (settings: AppSettings): Record<string, unknown> => {
   return settings.provider === 'openrouter' ? { reasoning: { effort } } : { reasoning_effort: effort };
 };
 
-const usesPromptCaching = (settings: AppSettings) =>
-  settings.provider === 'openrouter' && activeConfig(settings).model.startsWith('anthropic/');
+/**
+ * Which models need explicit cache markers sent through OpenRouter:
+ * Anthropic, Qwen and Gemini use `cache_control` blocks; OpenAI models use
+ * `prompt_cache_breakpoint`, which OpenRouter translates. Models of other providers
+ * (OpenAI, Grok, DeepSeek, Groq, Moonshot, Gemini implicit) cache stable prefixes
+ * automatically and need no markers.
+ */
+const usesPromptCaching = (settings: AppSettings): boolean => {
+  if (settings.provider !== 'openrouter') return false;
+  const model = activeConfig(settings).model.toLowerCase();
+  return model.startsWith('anthropic/') || model.startsWith('qwen') || model.includes('deepseek-v3.2') || model.includes('qwen') || model.startsWith('google/gemini') || model.startsWith('openai/');
+};
 
 const withCacheBreakpoint = (message: ChatMessage): ChatMessage => {
   if (message.role !== 'system' && message.role !== 'user') return message;
@@ -339,11 +349,9 @@ const withCacheBreakpoint = (message: ChatMessage): ChatMessage => {
 };
 
 /**
- * Anthropic models need explicit cache breakpoints (other providers cache stable prefixes
- * automatically). Breakpoints are placed on the system prompt and on the two most recent user
- * messages: the last one covers the current turn, and the previous one lets the next request
- * reuse everything up to the end of the previous turn. Up to four are allowed per request, and
- * the tool definitions are cached as part of the prefix.
+ * Explicit cache breakpoints for models that need them: the system prompt and the two most
+ * recent user messages (up to 4 breakpoints, the OpenRouter limit; OpenAI-style markers get
+ * translated by OpenRouter). The tool definitions are cached as part of the prefix.
  */
 const applyPromptCaching = (settings: AppSettings, messages: ChatMessage[]): ChatMessage[] => {
   if (!usesPromptCaching(settings)) return messages;

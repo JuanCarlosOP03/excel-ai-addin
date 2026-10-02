@@ -4,6 +4,7 @@ import { isApiSupported } from './excel/common';
 
 export type ToolName =
   | 'use_skill'
+  | 'spawn_agents'
   | 'get_workbook_context' | 'read_range' | 'search_workbook' | 'profile_data'
   | 'trace_formula' | 'find_formula_errors' | 'read_attachment'
   | 'activate_worksheet' | 'create_worksheet' | 'rename_worksheet' | 'delete_worksheet' | 'set_worksheet_visibility'
@@ -74,6 +75,27 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     'Load the expert instructions of a skill (listed in the system prompt) before building something it covers. Load each skill once per conversation.',
     { skill_id: { type: 'string', description: 'Id from the skill list.' } },
     ['skill_id']),
+
+  // --- Delegation ---------------------------------------------------------------
+  tool('spawn_agents', READ,
+    'Split a large read-and-analyze task into up to 6 read-only sub-agents that run in parallel, then collect their reports. Each sub-agent gets its own conversation and can inspect the workbook (context, read_range, search, profile, trace) but cannot write. Use it when several parts of the workbook must be examined and doing it alone would take many slow reads. Do not use it for single-range questions.',
+    {
+      specs: {
+        type: 'array',
+        description: 'The sub-agents to run.',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'Short role name, e.g. "pricing-reviewer".' },
+            task: { type: 'string', description: 'Precise task with sheet names, ranges and what to compute. It must be read-only.' },
+            extract: { type: 'string', description: 'What the report must contain, e.g. "the 5 largest variances with cell references".' },
+          },
+          required: ['name', 'task'],
+        },
+      },
+      strategy: { type: 'string', description: 'Optional note about how the work was split.' },
+    },
+    ['specs']),
 
   // --- Inspect and analyze ---------------------------------------------------
   tool('get_workbook_context', READ,
@@ -380,6 +402,7 @@ const list = (value: unknown) =>
 export const describeToolCall = (name: string, args: Record<string, unknown>): string => {
   switch (name) {
     case 'use_skill': return `Use skill "${args.skill_id}"`;
+    case 'spawn_agents': return `Run ${count(args.specs)} sub-agent${count(args.specs) === 1 ? '' : 's'} in parallel`;
     case 'get_workbook_context': return 'Inspect workbook structure';
     case 'read_range': return `Read ${at(args, 'range_address')}`;
     case 'search_workbook': return `Search for "${args.query}"${args.sheet_name ? ` in ${args.sheet_name}` : ''}`;
