@@ -1,5 +1,5 @@
 import type { AppSettings } from '../utils/storage';
-import { createChatCompletion, type ChatMessage, type ContentPart, type ToolCall } from './llmClient';
+import { addUsage, createChatCompletion, type ChatMessage, type ContentPart, type TokenUsage, type ToolCall } from './llmClient';
 import { describeToolCall, getAvailableTools, isIrreversibleTool, isMutatingTool, isToolName } from './tools';
 import {
   ToolError,
@@ -31,7 +31,9 @@ export type AgentEvent =
   | { type: 'tool_result'; callId: string; status: 'ok' | 'error' | 'rejected'; detail: string; location?: ChangeLocation }
   /** Transient progress such as retries. */
   | { type: 'status'; text: string }
-  | { type: 'info'; text: string };
+  | { type: 'info'; text: string }
+  /** Tokens used by the whole run (sent once, at the end). */
+  | { type: 'usage'; usage: TokenUsage };
 
 export interface ApprovalRequest {
   callId: string;
@@ -212,6 +214,11 @@ export const runAgentLoop = async (options: AgentLoopOptions): Promise<AgentLoop
     }
   };
 
+  let usage: TokenUsage | undefined;
+  const addStepUsage = (step?: TokenUsage) => {
+    if (step) usage = addUsage(usage, step);
+  };
+
   beginUndoGroup();
   try {
     if (config.modelInfo?.id === config.model && config.modelInfo.supportsTools === false) {
@@ -235,7 +242,7 @@ export const runAgentLoop = async (options: AgentLoopOptions): Promise<AgentLoop
 
     for (let step = 0; step < MAX_STEPS; step++) {
       signal?.throwIfAborted();
-      const { content, toolCalls, finishReason, reasoningDetails } = await createChatCompletion(settings, [system, ...messages], available, {
+      const completion = await createChatCompletion(settings, [system, ...messages], available, {
         signal,
         stream: settings.streaming,
         onTextDelta: delta => onEvent({ type: 'assistant_delta', delta }),
@@ -243,6 +250,8 @@ export const runAgentLoop = async (options: AgentLoopOptions): Promise<AgentLoop
         onRetry: ({ delaySeconds, reason, attempt }) =>
           onEvent({ type: 'status', text: `Provider ${reason}; retrying in ${delaySeconds}s (attempt ${attempt})…` }),
       });
+      const { content, toolCalls, finishReason, reasoningDetails } = completion;
+      addStepUsage(completion.usage);
       messages.push({
         role: 'assistant',
         content,
@@ -255,6 +264,7 @@ export const runAgentLoop = async (options: AgentLoopOptions): Promise<AgentLoop
       if (toolCalls.length === 0) {
         const cutOff = finishReason === 'length' ? '\n\n*[The answer was cut off because the model reached its output limit.]*' : '';
         onEvent({ type: 'assistant_text', text: (text || '(Empty response)') + cutOff });
+        if (usage) onEvent({ type: 'usage', usage });
         return { history: messages, status: 'done' };
       }
 
@@ -266,9 +276,11 @@ export const runAgentLoop = async (options: AgentLoopOptions): Promise<AgentLoop
     }
 
     onEvent({ type: 'assistant_text', text: `Stopped after ${MAX_STEPS} steps without a final answer. Send "continue" to keep going.` });
+    if (usage) onEvent({ type: 'usage', usage });
     return { history: messages, status: 'max_steps' };
   } catch (e) {
     closeDanglingToolCalls(messages);
+    if (usage) onEvent({ type: 'usage', usage });
     if (isAbort(e, signal)) return { history: messages, status: 'aborted' };
     console.error(e);
     return { history: messages, status: 'error', error: errorMessage(e) };

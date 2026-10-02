@@ -14,7 +14,7 @@ import {
 } from '../agent/excel';
 import { readAttachment, type Attachment } from '../agent/attachments';
 import { stripBinaryContent } from '../agent/context';
-import type { ChatMessage } from '../agent/llmClient';
+import type { ChatMessage, TokenUsage } from '../agent/llmClient';
 import { findSkill, getSkills, type Skill } from '../agent/skills';
 import { Markdown } from './Markdown';
 import { ChangesCard, ToolCard } from './ToolCard';
@@ -235,6 +235,19 @@ const saveChat = debounce(({ key, chat }: { key: string; chat: StoredChat }) => 
 
 let lastItemId = 0;
 const newId = () => `${Date.now().toString(36)}-${++lastItemId}`;
+
+/** "12.3k tokens in · 9.8k cached (80%) · 1.2k out" */
+const describeUsage = (usage: TokenUsage) => {
+  const short = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+  const parts: string[] = [];
+  if (usage.promptTokens) parts.push(`${short(usage.promptTokens)} tokens in`);
+  if (usage.cachedTokens) {
+    const share = usage.promptTokens ? ` (${Math.round((usage.cachedTokens / usage.promptTokens) * 100)}% cached)` : ' (cached)';
+    parts.push(`${short(usage.cachedTokens)}${share}`);
+  }
+  if (usage.completionTokens) parts.push(`${short(usage.completionTokens)} out`);
+  return parts.join(' · ');
+};
 
 const formatElapsed = (ms: number) => {
   const seconds = Math.max(0, Math.floor(ms / 1000));
@@ -470,6 +483,9 @@ export const Chat = forwardRef<ChatHandle, ChatProps>(({ onOpenSettings }, ref) 
           break;
         case 'info':
           addItem({ kind: 'info', id: newId(), text: event.text });
+          break;
+        case 'usage':
+          addItem({ kind: 'info', id: newId(), text: describeUsage(event.usage) });
           break;
       }
     };

@@ -25,6 +25,14 @@ export interface ToolDefinition {
 
 export type ReasoningDetail = Record<string, unknown> & { type?: string; index?: number };
 
+export interface TokenUsage {
+  /** Input tokens billed (including the cached ones). */
+  promptTokens?: number;
+  /** Input tokens served from the provider's prompt cache (billed at a fraction). */
+  cachedTokens?: number;
+  completionTokens?: number;
+}
+
 export interface ChatCompletionResult {
   content: string | null;
   toolCalls: ToolCall[];
@@ -33,8 +41,24 @@ export interface ChatCompletionResult {
   reasoningDetails?: ReasoningDetail[];
   /** `length` means the model hit its output limit and the response is truncated. */
   finishReason: string | null;
-  promptTokens?: number;
+  usage?: TokenUsage;
 }
+
+/** Sums the usage of several steps of one run. */
+export const addUsage = (a: TokenUsage | undefined, b: TokenUsage | undefined): TokenUsage => ({
+  promptTokens: (a?.promptTokens ?? 0) + (b?.promptTokens ?? 0) || undefined,
+  cachedTokens: (a?.cachedTokens ?? 0) + (b?.cachedTokens ?? 0) || undefined,
+  completionTokens: (a?.completionTokens ?? 0) + (b?.completionTokens ?? 0) || undefined,
+});
+
+const readUsage = (usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number }; cache_read_input_tokens?: number }): TokenUsage | undefined => {
+  if (!usage) return undefined;
+  // OpenAI-compatible providers report prompt_tokens_details.cached_tokens; Anthropic-style
+  // responses use cache_read_input_tokens.
+  const cachedTokens = usage.prompt_tokens_details?.cached_tokens ?? usage.cache_read_input_tokens;
+  if (usage.prompt_tokens === undefined && cachedTokens === undefined && usage.completion_tokens === undefined) return undefined;
+  return { promptTokens: usage.prompt_tokens, cachedTokens, completionTokens: usage.completion_tokens };
+};
 
 export interface CompletionOptions {
   signal?: AbortSignal;
@@ -161,6 +185,13 @@ interface ReasoningFields {
   reasoning_details?: ReasoningDetail[];
 }
 
+interface RawUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  prompt_tokens_details?: { cached_tokens?: number };
+  cache_read_input_tokens?: number;
+}
+
 interface CompletionChunk {
   error?: { message?: string } | string;
   choices?: {
@@ -168,7 +199,7 @@ interface CompletionChunk {
     delta?: { content?: string | null; tool_calls?: (Partial<ToolCall> & { index?: number; function?: { name?: string; arguments?: string } })[] } & ReasoningFields;
     finish_reason?: string | null;
   }[];
-  usage?: { prompt_tokens?: number };
+  usage?: RawUsage;
 }
 
 const reasoningText = (fields?: ReasoningFields) => fields?.reasoning || fields?.reasoning_content || '';
@@ -213,9 +244,9 @@ export const readCompletionStream = async (
   let buffer = '';
   let content = '';
   let reasoning = '';
+  let usage: TokenUsage | undefined;
   const reasoningDetails: ReasoningDetail[] = [];
   let finishReason: string | null = null;
-  let promptTokens: number | undefined;
   const calls: { id?: string; name: string; arguments: string }[] = [];
 
   const fragmentIndex = (fragment: { index?: number; id?: string }) => {
@@ -232,7 +263,9 @@ export const readCompletionStream = async (
     if (payload === '[DONE]') return;
     const chunk = parseJson(payload) as CompletionChunk;
     throwChunkError(chunk);
-    if (chunk.usage?.prompt_tokens) promptTokens = chunk.usage.prompt_tokens;
+    const reported = readUsage(chunk.usage);
+    // Usage arrives in its own final chunk when streaming.
+    if (reported) usage = reported;
     const choice = chunk.choices?.[0];
     if (!choice) return;
     if (choice.finish_reason) finishReason = choice.finish_reason;
@@ -271,7 +304,7 @@ export const readCompletionStream = async (
     content: content || null,
     toolCalls: normalizeToolCalls(calls.filter(Boolean).map(c => ({ id: c.id, function: { name: c.name, arguments: c.arguments } }))),
     finishReason,
-    promptTokens,
+    ...(usage ? { usage } : {}),
     ...(reasoning ? { reasoning } : {}),
     ...(reasoningDetails.length ? { reasoningDetails } : {}),
   };
@@ -307,12 +340,17 @@ const withCacheBreakpoint = (message: ChatMessage): ChatMessage => {
 
 /**
  * Anthropic models need explicit cache breakpoints (other providers cache stable prefixes
- * automatically): the system prompt and the latest user message.
+ * automatically). Breakpoints are placed on the system prompt and on the two most recent user
+ * messages: the last one covers the current turn, and the previous one lets the next request
+ * reuse everything up to the end of the previous turn. Up to four are allowed per request, and
+ * the tool definitions are cached as part of the prefix.
  */
 const applyPromptCaching = (settings: AppSettings, messages: ChatMessage[]): ChatMessage[] => {
   if (!usesPromptCaching(settings)) return messages;
   const lastUser = messages.findLastIndex(m => m.role === 'user');
-  return messages.map((m, i) => (m.role === 'system' || i === lastUser ? withCacheBreakpoint(m) : m));
+  const previousUser = messages.findLastIndex((m, i) => m.role === 'user' && i < lastUser);
+  const breakpoints = new Set([lastUser, previousUser].filter(i => i !== -1));
+  return messages.map((m, i) => (m.role === 'system' || breakpoints.has(i) ? withCacheBreakpoint(m) : m));
 };
 
 export const createChatCompletion = async (
@@ -340,7 +378,8 @@ export const createChatCompletion = async (
       // Models that think with a reasoning budget (e.g. Claude) don't accept a custom temperature.
       ...(Object.keys(reasoning).length && settings.reasoningEffort !== 'none' ? {} : { temperature: 0.2 }),
       ...reasoning,
-      ...(stream ? { stream: true } : {}),
+      // OpenRouter always reports usage, but streaming needs it requested explicitly.
+      ...(stream ? { stream: true, ...(settings.provider === 'openrouter' ? { stream_options: { include_usage: true } } : {}) } : {}),
     }),
     signal: options.signal,
   }, options);
@@ -361,7 +400,7 @@ export const createChatCompletion = async (
     content: choice.message.content ?? null,
     toolCalls: normalizeToolCalls(choice.message.tool_calls ?? []),
     finishReason: choice.finish_reason ?? null,
-    promptTokens: data.usage?.prompt_tokens,
+    ...(readUsage(data.usage) ? { usage: readUsage(data.usage) } : {}),
     ...(thinking ? { reasoning: thinking } : {}),
     ...(choice.message.reasoning_details?.length ? { reasoningDetails: choice.message.reasoning_details } : {}),
   };
