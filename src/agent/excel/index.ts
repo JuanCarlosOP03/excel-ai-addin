@@ -1,5 +1,6 @@
 import type { ToolName } from '../tools';
 import type { Args, Executor, ToolOptions } from './common';
+import { mapOfficeError } from './errorMapping';
 import { createChart, createPivotTable, deleteChart, deletePivotTable, updateChart, updatePivotTable } from './analysisTools';
 import {
   addDataValidation,
@@ -35,6 +36,7 @@ import {
 } from './workbookTools';
 
 export { ToolError, isApiSupported, type ChangeLocation, type ToolOptions } from './common';
+export { mapOfficeError } from './errorMapping';
 export { CHART_TYPES } from './analysisTools';
 export { previewToolCall, selectReference, type GridPreview } from './preview';
 export { beginUndoGroup, canUndo, cleanupOrphanBackups, endUndoGroup, initUndo, undoLastGroup, type UndoStep } from './undo';
@@ -85,6 +87,6 @@ const EXECUTORS: Record<ExcelToolName, Executor> = {
   delete_pivot_table: deletePivotTable,
 };
 
-/** Runs one tool in its own Excel batch. Throws ToolError or Office errors on failure. */
+/** Runs one tool in its own Excel batch; native Office errors are mapped to semantic ToolErrors. */
 export const executeTool = (name: ExcelToolName, args: Args, options: ToolOptions = {}): Promise<unknown> =>
-  Excel.run(context => EXECUTORS[name](context, args, options));
+  Excel.run(context => EXECUTORS[name](context, args, options)).catch(mapOfficeError);

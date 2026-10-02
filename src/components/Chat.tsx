@@ -641,6 +641,9 @@ export const Chat = forwardRef<ChatHandle, ChatProps>(({ onOpenSettings }, ref) 
   };
 
   const awaitingApproval = items.some(item => item.kind === 'tool' && item.status === 'awaiting_approval');
+  const keysLockedNotice = settings.protectKeys && settings.keysLocked
+    ? '🔒 API keys are locked. Open Settings and enter your passphrase to unlock them.'
+    : '';
   const activeConfig = settings.providers[settings.provider];
   const modelInfo = activeConfig.modelInfo?.id === activeConfig.model ? activeConfig.modelInfo : undefined;
   const allSkills = getSkills(settings);
@@ -762,6 +765,7 @@ export const Chat = forwardRef<ChatHandle, ChatProps>(({ onOpenSettings }, ref) 
             ))}
           </div>
         )}
+        {keysLockedNotice && <div className={styles.warning}>{keysLockedNotice}</div>}
         {attachmentWarning && <div className={styles.warning}>{attachmentWarning}</div>}
         <input
           ref={fileInputRef}

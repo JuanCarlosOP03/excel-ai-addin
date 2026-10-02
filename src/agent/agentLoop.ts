@@ -150,6 +150,8 @@ const closeDanglingToolCalls = (messages: ChatMessage[]) => {
   }
 };
 
+const MAX_IDENTICAL_CALLS = 3;
+
 /**
  * Sends the user's message with the tool catalog, executes the tool calls the model makes
  * (asking for approval before workbook changes), feeds the results back, and repeats until
@@ -160,6 +162,8 @@ export const runAgentLoop = async (options: AgentLoopOptions): Promise<AgentLoop
   const config = settings.providers[settings.provider];
   let messages: ChatMessage[] = [...options.history];
   let approveAll = settings.autoApprove;
+  // Detects correction loops: the same tool with the same arguments called again and again.
+  const callCounts = new Map<string, number>();
 
   const runToolCall = async (call: ToolCall, argumentsTruncated: boolean): Promise<string> => {
     const { name } = call.function;
@@ -188,6 +192,14 @@ export const runAgentLoop = async (options: AgentLoopOptions): Promise<AgentLoop
 
     if (parseError) return fail(parseError);
     if (!known) return fail(`Unknown tool "${name}".`);
+
+    // Same tool + same arguments, repeated: the model is in a failed-correction loop.
+    const signature = `${name} ${JSON.stringify(args)}`;
+    const repeats = (callCounts.get(signature) ?? 0) + 1;
+    callCounts.set(signature, repeats);
+    if (repeats > MAX_IDENTICAL_CALLS) {
+      return fail(`This exact call was already made ${repeats - 1} times with the same result. Stop repeating it: change the arguments, use a different tool or approach, or explain to the user why this cannot be done.`);
+    }
     if (!getAvailableTools().available.some(t => t.function.name === name)) return fail(`The tool "${name}" is not available in this version of Excel.`);
 
     if (name === 'use_skill') {

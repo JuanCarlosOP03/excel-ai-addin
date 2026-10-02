@@ -20,7 +20,7 @@
         
         <h2>2. Data Collection and Storage</h2>
         <p><strong>We do not collect, store, or transmit your data to any of our own servers.</strong></p>
-        <p>The Excel AI add-in is a client-side application. All settings, including your API keys and configuration preferences, are stored locally within your browser's local storage. Browser local storage is not encrypted, and it is shared by all pages served from the same web address (origin) as the add-in.</p>
+        <p>The Excel AI add-in is a client-side application. All settings, including your API keys and configuration preferences, are stored locally within your browser's local storage. Browser local storage is not encrypted, and it is shared by all pages served from the same web address (origin) as the add-in. Optionally, the add-in can encrypt the API keys at rest with AES-GCM using a passphrase of your choice: while that protection is enabled, the browser storage contains only ciphertext, and the keys are decrypted in memory only after you enter the passphrase. The passphrase is never stored.</p>
         <p>The conversation and the undo history of each workbook are stored in the browser's IndexedDB on your device so they can be restored when you reopen the add-in. A random identifier is saved in the workbook's add-in settings to recognize it. Use "New chat" to delete a workbook's stored conversation. To allow deleted sheets to be restored, a hidden copy of each deleted sheet is kept in the workbook while the deletion can still be undone.</p>
         
         <h2>3. Third-Party Services</h2>

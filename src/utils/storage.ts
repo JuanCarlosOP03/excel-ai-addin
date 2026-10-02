@@ -1,5 +1,8 @@
 export type ProviderId = 'openrouter' | 'gemini' | 'lmstudio' | 'opencode' | 'custom';
 
+import type { EncryptedBox } from './secretBox';
+import { decryptJson, encryptJson } from './secretBox';
+
 /** Capabilities reported by the provider's model list (unknown when undefined). */
 export interface ModelInfo {
   id: string;
@@ -67,7 +70,19 @@ export interface AppSettings {
   /** Up to MAX_FAVORITES models the user switches between from the chat. */
   favorites: FavoriteModel[];
   customSkills: CustomSkill[];
+  /**
+   * When true, API keys are stored encrypted with a passphrase and memory-only until
+   * unlocked; `keysLocked` says whether they are readable right now.
+   */
+  protectKeys: boolean;
+  keysLocked: boolean;
 }
+
+const unprotect = (settings: AppSettings): AppSettings => ({
+  ...settings,
+  protectKeys: false,
+  keysLocked: false,
+});
 
 const clamp = (limits: { min: number; max: number; default: number }) => (value: unknown): number => {
   const n = Math.round(Number(value));
@@ -149,6 +164,24 @@ export const PROVIDERS: Record<ProviderId, ProviderInfo> = {
 export const PROVIDER_IDS = Object.keys(PROVIDERS) as ProviderId[];
 
 const STORAGE_KEY = 'excel_ai_settings';
+
+// Session state: the decrypted keys live here, never back in localStorage.
+let sessionSettings: AppSettings | null = null;
+let keyBox: EncryptedBox | null = null;
+
+const collectKeys = (settings: AppSettings): Record<ProviderId, string> =>
+  Object.fromEntries(PROVIDER_IDS.map(id => [id, settings.providers[id].apiKey])) as Record<ProviderId, string>;
+
+const applyKeys = (settings: AppSettings, keys: Partial<Record<ProviderId, string>>) => {
+  const merged: AppSettings = {
+    ...settings,
+    providers: Object.fromEntries(PROVIDER_IDS.map(id => [
+      id,
+      { ...settings.providers[id], apiKey: keys[id] ?? settings.providers[id].apiKey },
+    ])) as Record<ProviderId, ProviderConfig>,
+  };
+  return { ...merged, keysLocked: false };
+};
 const LEGACY_STORAGE_KEY = 'antigravity_settings';
 
 const defaultProviderConfig = (id: ProviderId): ProviderConfig => ({
@@ -169,6 +202,8 @@ export const createDefaultSettings = (): AppSettings => ({
   reasoningEffort: 'default',
   favorites: [],
   customSkills: [],
+  protectKeys: false,
+  keysLocked: false,
 });
 
 const isProviderId = (value: unknown): value is ProviderId =>
@@ -193,6 +228,8 @@ const mergeSettings = (stored: Partial<AppSettings>): AppSettings => {
     .filter(s => s && typeof s.id === 'string' && typeof s.name === 'string' && typeof s.instructions === 'string')
     .slice(0, MAX_CUSTOM_SKILLS)
     .map(s => ({ id: s.id, name: s.name, description: str(s.description, ''), instructions: s.instructions.slice(0, MAX_SKILL_INSTRUCTIONS) }));
+  // keysLocked is decided by loadSettings (whether an encrypted box exists), not persisted.
+  settings.protectKeys = stored.protectKeys === true;
   for (const id of PROVIDER_IDS) {
     const saved = stored.providers?.[id];
     if (saved) settings.providers[id] = { ...settings.providers[id], ...saved };
@@ -228,21 +265,65 @@ const migrateLegacySettings = (legacy: Record<string, unknown>): AppSettings => 
 };
 
 export const loadSettings = (): AppSettings => {
+  // Already unlocked this session: serve the decrypted copy.
+  if (sessionSettings?.keysLocked === false && sessionSettings.protectKeys) return sessionSettings;
   try {
-    const data = localStorage.getItem(STORAGE_KEY);
-    if (data) return mergeSettings(JSON.parse(data));
-
-    const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
-    if (legacy) {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
+      if (!legacy) return createDefaultSettings();
       const migrated = migrateLegacySettings(JSON.parse(legacy));
       saveSettings(migrated);
       localStorage.removeItem(LEGACY_STORAGE_KEY);
       return migrated;
     }
+    const stored = JSON.parse(raw) as Partial<AppSettings> & { encryptedKeys?: EncryptedBox };
+    keyBox = stored.encryptedKeys ?? null;
+    const settings = mergeSettings(stored);
+    if (settings.protectKeys && keyBox) {
+      // Locked: no plaintext keys available until unlockKeys() succeeds.
+      sessionSettings = { ...settings, keysLocked: true };
+      return sessionSettings;
+    }
+    sessionSettings = unprotect(settings);
+    return sessionSettings;
   } catch (e) {
     console.error('Failed to load settings', e);
+    return createDefaultSettings();
   }
-  return createDefaultSettings();
+};
+
+/** Whether the keys are protected and still need a passphrase this session. */
+export const keysAreLocked = () => loadSettings().keysLocked;
+
+/** Decrypts the stored key box into the session; throws on a wrong passphrase. */
+export const unlockKeys = async (passphrase: string): Promise<void> => {
+  const settings = loadSettings();
+  if (!keyBox) throw new Error('There are no encrypted keys to unlock.');
+  const keys = await decryptJson<Record<ProviderId, string>>(keyBox, passphrase);
+  sessionSettings = applyKeys(settings, keys);
+};
+
+/** Re-locks: the decrypted keys are dropped from memory. */
+export const lockKeys = () => {
+  if (!sessionSettings?.protectKeys) return;
+  sessionSettings = { ...loadSettings(), keysLocked: true };
+};
+
+/** Turns key protection on or off, encrypting or decrypting the stored keys. */
+export const setKeyProtection = async (settings: AppSettings, enable: boolean, passphrase: string): Promise<AppSettings> => {
+  if (enable) {
+    if (!passphrase) throw new Error('Enter a passphrase.');
+    keyBox = await encryptJson(collectKeys(settings), passphrase);
+    sessionSettings = { ...settings, protectKeys: true, keysLocked: false };
+    // Persisted without plaintext keys: they live only inside the encrypted box.
+    persistSettings({ ...sessionSettings, providers: stripKeys(sessionSettings.providers), encryptedKeys: keyBox });
+    return sessionSettings;
+  }
+  keyBox = null;
+  sessionSettings = { ...settings, protectKeys: false, keysLocked: false };
+  persistSettings(sessionSettings);
+  return sessionSettings;
 };
 
 /** Makes a favorite the active model. */
@@ -262,13 +343,39 @@ export const activeModelLabel = (settings: AppSettings): string => {
   return favorite?.label || model.split('/').pop() || model || 'No model';
 };
 
-/** Parses an exported settings file; throws when it isn't valid JSON. */
-export const parseImportedSettings = (text: string): AppSettings => mergeSettings(JSON.parse(text));
+/** Parses an exported settings file (keys stay as they are in the file). */
+export const parseImportedSettings = (text: string): AppSettings => {
+  const imported = mergeSettings(JSON.parse(text));
+  // Importing replaces the session copy; keys in the file are honored.
+  sessionSettings = imported;
+  return imported;
+};
 
 export const saveSettings = (settings: AppSettings) => {
+  sessionSettings = settings;
+  // With protection on, keys are stored only inside the encrypted box.
+  persistSettings(settings.protectKeys ? { ...settings, providers: stripKeys(settings.providers) } : settings);
+};
+
+const stripKeys = (providers: Record<ProviderId, ProviderConfig>) =>
+  Object.fromEntries(PROVIDER_IDS.map(id => [id, { ...providers[id], apiKey: '' }])) as Record<ProviderId, ProviderConfig>;
+
+const persistSettings = (settings: Partial<AppSettings> & { encryptedKeys?: EncryptedBox }) => {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
   } catch (e) {
     console.error('Failed to save settings', e);
   }
 };
+
+export const importEncryptedKeys = async (settings: AppSettings, box: unknown, passphrase: string): Promise<AppSettings> => {
+  const keys = await decryptJson<Record<ProviderId, string>>(box as EncryptedBox, passphrase);
+  keyBox = box as EncryptedBox;
+  sessionSettings = applyKeys(settings, keys);
+  persistSettings({ ...sessionSettings, encryptedKeys: keyBox });
+  return sessionSettings;
+};
+
+export const exportEncryptedKeys = () => keyBox;
+
+export const keysAreEncrypted = () => keyBox !== null;

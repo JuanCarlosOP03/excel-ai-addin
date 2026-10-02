@@ -12,7 +12,10 @@ import {
   clampContextTokens,
   clampReadCells,
   loadSettings,
+  lockKeys,
   saveSettings,
+  setKeyProtection,
+  unlockKeys,
   activeModelLabel,
   type AppSettings,
   type CustomSkill,
@@ -94,6 +97,12 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
   // Kept as text while editing; validated and clamped on save.
   const [maxReadCellsText, setMaxReadCellsText] = useState(() => String(settings.maxReadCells));
   const [maxContextText, setMaxContextText] = useState(() => String(settings.maxContextTokens));
+  // Key protection state. `passphrase` is only kept here, never saved.
+  const [passphrase, setPassphrase] = useState('');
+  const [passphrase2, setPassphrase2] = useState('');
+  const [unlockText, setUnlockText] = useState('');
+  const [keyError, setKeyError] = useState('');
+  const [isWorkingKeys, setIsWorkingKeys] = useState(false);
 
   const provider = settings.provider;
   const info = PROVIDERS[provider];
@@ -204,6 +213,59 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
     onBack();
   };
 
+  const enableProtection = async () => {
+    setIsWorkingKeys(true);
+    setKeyError('');
+    try {
+      if (passphrase !== passphrase2) throw new Error('The passphrases do not match.');
+      if (passphrase.length < 8) throw new Error('Use a passphrase of at least 8 characters.');
+      const next = await setKeyProtection({ ...settings, maxReadCells: clampReadCells(maxReadCellsText), maxContextTokens: clampContextTokens(maxContextText) }, true, passphrase);
+      setSettings(next);
+      setPassphrase('');
+      setPassphrase2('');
+    } catch (e) {
+      setKeyError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setIsWorkingKeys(false);
+    }
+  };
+
+  const disableProtection = async () => {
+    setIsWorkingKeys(true);
+    setKeyError('');
+    try {
+      // Disabling needs the current passphrase only when the keys are still locked.
+      const next = settings.keysLocked
+        ? await unlockKeys(unlockText).then(() => setKeyProtection(loadSettings(), false, ''))
+        : await setKeyProtection(settings, false, '');
+      setSettings(next);
+      setUnlockText('');
+    } catch (e) {
+      setKeyError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setIsWorkingKeys(false);
+    }
+  };
+
+  const unlock = async () => {
+    setIsWorkingKeys(true);
+    setKeyError('');
+    try {
+      await unlockKeys(unlockText);
+      setSettings(loadSettings());
+      setUnlockText('');
+    } catch (e) {
+      setKeyError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setIsWorkingKeys(false);
+    }
+  };
+
+  const lockNow = () => {
+    lockKeys();
+    setSettings(loadSettings());
+  };
+
   const capabilities = modelInfo && [
     modelInfo.supportsTools === undefined ? null : modelInfo.supportsTools ? '✓ tool calling' : null,
     modelInfo.supportsImages ? '✓ images' : null,
@@ -246,8 +308,61 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
       )}
 
       <Field label={info.requiresKey ? 'API key' : 'API key (optional)'}>
-        <Input type="password" value={config.apiKey} onChange={(_, data) => updateConfig({ apiKey: data.value })} />
+        <Input
+          type="password"
+          value={config.apiKey}
+          disabled={settings.protectKeys && settings.keysLocked}
+          placeholder={settings.protectKeys && settings.keysLocked ? '🔒 locked — unlock below to edit' : ''}
+          onChange={(_, data) => updateConfig({ apiKey: data.value })}
+        />
       </Field>
+
+      <div className={styles.listItem}>
+        <div className={styles.row}>
+          <div className={styles.grow}>
+            <b>🔐 API key protection</b>
+            <div className={styles.hint}>
+              Encrypts all API keys with a passphrase (AES-GCM). Keys stay encrypted in the browser storage and in memory only while unlocked; without the passphrase, nothing in the storage can read them.
+            </div>
+          </div>
+        </div>
+        {keyError && <Field validationState="error" validationMessage={keyError} />}
+        {settings.protectKeys ? (
+          settings.keysLocked ? (
+            <div className={styles.row}>
+              <Field label="Passphrase" className={styles.grow}>
+                <Input type="password" value={unlockText} onChange={(_, data) => setUnlockText(data.value)} onKeyDown={e => e.key === 'Enter' && void unlock()} />
+              </Field>
+              <Button appearance="primary" onClick={() => void unlock()} disabled={!unlockText || isWorkingKeys}>Unlock</Button>
+            </div>
+          ) : (
+            <div className={styles.row}>
+              <div className={styles.hint}>✓ Keys are unlocked for this session (protected and encrypted at rest).</div>
+              <Button size="small" onClick={lockNow}>Lock now</Button>
+            </div>
+          )
+        ) : (
+          <>
+            <div className={styles.row}>
+              <Field label="New passphrase" className={styles.grow}>
+                <Input type="password" value={passphrase} onChange={(_, data) => setPassphrase(data.value)} />
+              </Field>
+            </div>
+            <div className={styles.row}>
+              <Field label="Repeat passphrase" className={styles.grow}>
+                <Input type="password" value={passphrase2} onChange={(_, data) => setPassphrase2(data.value)} />
+              </Field>
+              <Button appearance="primary" onClick={() => void enableProtection()} disabled={!passphrase || isWorkingKeys}>
+                {isWorkingKeys ? 'Working…' : 'Enable protection'}
+              </Button>
+            </div>
+            <div className={styles.hint}>If you forget the passphrase, you can disable protection by re-importing a config exported while unlocked, or clear the browser storage and re-enter the keys.</div>
+          </>
+        )}
+        {settings.protectKeys && !settings.keysLocked && (
+          <Button onClick={() => void disableProtection()} disabled={isWorkingKeys}>Disable protection (store keys unencrypted)</Button>
+        )}
+      </div>
 
       <div className={styles.row}>
         <Field
@@ -450,7 +565,7 @@ export const Settings: React.FC<SettingsProps> = ({ onBack }) => {
       </Field>
 
       <div className={styles.hint}>
-        Settings and API keys are stored in this browser's local storage for the add-in's web address. They are only sent to the provider you choose (and to the CORS proxy, if enabled). Chat history and undo data are stored in this browser per workbook.
+        Settings are stored in this browser's local storage for the add-in's web address, and are only sent to the provider you choose (and to the CORS proxy, if enabled). Chat history and undo data are stored in this browser per workbook. Without key protection, API keys are stored unencrypted in that storage.
       </div>
 
       <Button appearance="primary" onClick={handleSave}>Save & close</Button>

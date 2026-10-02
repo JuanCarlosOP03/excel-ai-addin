@@ -1,8 +1,10 @@
 import {
   DEFAULT_TABLE_STYLE,
   ToolError,
+  cellAt,
   collectFormulaErrors,
   columnIndex,
+  type Cell,
   getTable,
   localAddress,
   matchName,
@@ -22,6 +24,27 @@ import { recordUndo, snapshotRange, type RangeSnapshot } from './undo';
 import { repairCollapsed } from './structureTools';
 
 const MAX_RETURNED_RESULTS = 50;
+/** Above this many cells, writes are done in chunks to avoid freezing the Office UI thread. */
+const MAX_WRITE_CELLS_PER_CHUNK = 5000;
+/** Formulas that can execute code, dial out or run DDE payloads; never written as formulas. */
+const DANGEROUS_FORMULA = /\b(CALL|CALLER|REGISTER|SETVALUE|WEBSERVICE)\s*\(/i;
+/** DDE payload syntax, e.g. =cmd|'/c calc'!A0. */
+const DDE_FORMULA = /(?:cmd|term)\s*\|/i;
+
+/**
+ * Guards against formula injection: values that Excel would parse as formulas are checked
+ * for dangerous functions (CALL/REGISTER/WEBSERVICE run code or dial out, `cmd|`-style
+ * payloads trigger DDE). Blocked cells are reported; the rest of the write still happens.
+ */
+export const inspectWriteValues = (values: Cell[][], targetAddress: string): string[] => {
+  const blocked: string[] = [];
+  values.forEach((row, r) => row.forEach((cell, c) => {
+    if (typeof cell === 'string' && /^[=+\-@]/.test(cell) && (DANGEROUS_FORMULA.test(cell) || DDE_FORMULA.test(cell))) {
+      if (blocked.length < 5) blocked.push(`${cellAt(targetAddress, r, c)}: ${cell.slice(0, 60)}`);
+    }
+  }));
+  return blocked;
+};
 
 /** Names, styles and auto-fits a freshly created table, keeping the undo snapshot in sync. */
 const finishTable = async (
@@ -126,8 +149,15 @@ export const setRangeValuesOrFormulas = async (context: Excel.RequestContext, ar
   }
 
   const snapshot = await snapshotRange(context, sheetName, target);
+  const blocked = inspectWriteValues(values, target.address);
   // `formulas` accepts both constants and formulas, parsed as if typed by the user.
-  target.formulas = values;
+  // Big matrices are written in row chunks: one sync per ~5000 cells keeps Excel responsive.
+  const chunkRows = Math.max(1, Math.floor(MAX_WRITE_CELLS_PER_CHUNK / cols));
+  for (let offset = 0; offset < rows; offset += chunkRows) {
+    const part = values.slice(offset, offset + chunkRows);
+    target.getCell(offset, 0).getResizedRange(part.length - 1, cols - 1).formulas = part;
+    await context.sync();
+  }
   target.load('address, values, valueTypes');
   await context.sync();
 
@@ -139,6 +169,7 @@ export const setRangeValuesOrFormulas = async (context: Excel.RequestContext, ar
     columns: cols,
     ...(rows * cols <= MAX_RETURNED_RESULTS ? { results: target.values } : {}),
     ...(formulaErrors.length ? { formulaErrors } : {}),
+    ...(blocked.length ? { blockedFormulas: blocked, note: `Blocked ${blocked.length} dangerous formula(s): ${blocked.join('; ')}. CALL/REGISTER/SETVALUE and WEBSERVICE run code or dial out; if the user really wants them, ask them to enter those manually.` } : {}),
     undoAvailable: snapshot !== null,
   };
 };
